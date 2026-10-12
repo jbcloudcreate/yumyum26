@@ -56,6 +56,8 @@
     Rolling 12-month retention trim. Suitable for a scheduled task.
 #>
 
+#.\Clear-SignageAuditLog.ps1 -DbPath 'E:\signagefeedadmin\data\feed.db' -Before '2026-10-13'
+
 [CmdletBinding(DefaultParameterSetName = 'ByDate')]
 param(
     [string] $AppPath,
