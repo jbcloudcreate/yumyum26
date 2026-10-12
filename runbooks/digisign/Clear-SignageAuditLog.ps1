@@ -56,8 +56,6 @@
     Rolling 12-month retention trim. Suitable for a scheduled task.
 #>
 
-#.\Clear-SignageAuditLog.ps1 -DbPath 'E:\signagefeedadmin\data\feed.db' -Before '2026-10-05'
-
 [CmdletBinding(DefaultParameterSetName = 'ByDate')]
 param(
     [string] $AppPath,
@@ -83,6 +81,11 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 Start-Transcript -Path (Join-Path $WorkDir "audit-purge-$stamp.log") | Out-Null
+
+# Set once the pool is stopped, cleared once it is started again. If the run
+# fails in between, the catch block brings the site back up rather than
+# leaving signage admin down.
+$script:poolStopped = $false
 
 function Say($msg, $colour = 'Gray') { Write-Host $msg -ForegroundColor $colour }
 function Mark($msg) { Say "`n=== $msg ===" 'Cyan' }
@@ -169,7 +172,9 @@ Could not locate feed.db.
     if (-not $SqliteExe) {
         $candidates = @(
             (Join-Path $PSScriptRoot 'sqlite3.exe'),
-            (Join-Path $WorkDir     'sqlite3.exe')
+            (Join-Path $WorkDir     'sqlite3.exe'),
+            'C:\temp\sqlite3.exe',
+            'C:\Temp\sqlite3.exe'
         ) + @(Get-Command sqlite3.exe -ErrorAction SilentlyContinue |
               Select-Object -ExpandProperty Source)
         $SqliteExe = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
@@ -186,7 +191,27 @@ sqlite3.exe not found.
     Say "  sqlite3  : $SqliteExe"
     Say "  Version  : $(& $SqliteExe -version)"
 
-    function Sql([string] $query) { & $SqliteExe $dbPath $query }
+    # sqlite3.exe reports failure via stderr and a non-zero exit code. A native
+    # command does NOT raise a terminating error in PowerShell, not even under
+    # $ErrorActionPreference = 'Stop', so without this check a failed DELETE
+    # would sail past and be reported as success.
+    function Sql([string] $query) {
+        $errFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $out = & $SqliteExe $dbPath $query 2> $errFile
+            $code = $LASTEXITCODE
+            $errText = if (Test-Path $errFile) { (Get-Content $errFile -Raw) } else { '' }
+
+            if ($code -ne 0) {
+                throw "sqlite3 failed (exit $code): $($errText.Trim())`n  Query: $($query.Trim())"
+            }
+            if ($errText -and $errText.Trim()) {
+                Say "  sqlite3 warning: $($errText.Trim())" 'Yellow'
+            }
+            return $out
+        }
+        finally { Remove-Item $errFile -Force -ErrorAction SilentlyContinue }
+    }
 
     # Confirm this is really the signage database before going near it. A
     # mistyped -DbPath pointing at some other SQLite file would otherwise
@@ -275,6 +300,7 @@ sqlite3.exe not found.
         "SELECT Id, FeedId, TimestampUtc, UserName, Action, ItemId, Summary
          FROM AuditLog $clause ORDER BY TimestampUtc;" |
         Set-Content -Path $csv -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw "sqlite3 failed exporting the archive (exit $LASTEXITCODE). Nothing deleted." }
     $csvRows = (Get-Content $csv | Measure-Object -Line).Lines - 1
     Say "  Entries exported: $csv ($csvRows rows)"
 
@@ -311,6 +337,7 @@ $($pools | ForEach-Object { "    $_" } | Out-String)
     }
 
     & $appcmdExe stop apppool /apppool.name:$AppPoolName
+    $script:poolStopped = $true
     Start-Sleep -Seconds 3
 
     $state = & $appcmdExe list apppool $AppPoolName /text:state
@@ -365,6 +392,7 @@ COMMIT;
     # ---------------------------------------------------------------- 9. restart
     Mark 'Step 9 - restart and smoke test'
     & $appcmdExe start apppool /apppool.name:$AppPoolName
+    $script:poolStopped = $false
     Start-Sleep -Seconds 3
     Say "  App pool state: $(& $appcmdExe list apppool $AppPoolName /text:state)"
 
@@ -384,7 +412,22 @@ COMMIT;
 }
 catch {
     Say "`nFAILED: $($_.Exception.Message)" 'Red'
-    Say "The database backup, if taken, is in $WorkDir" 'Yellow'
+
+    if ($script:poolStopped) {
+        Say "`nApp pool was stopped by this run - restarting it so the site is not left down." 'Yellow'
+        try {
+            $exe = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
+            & $exe start apppool /apppool.name:$AppPoolName | Out-Null
+            Start-Sleep -Seconds 2
+            Say "  App pool state: $(& $exe list apppool $AppPoolName /text:state)" 'Green'
+        } catch {
+            Say "  COULD NOT RESTART THE APP POOL - start it manually:" 'Red'
+            Say "    appcmd start apppool /apppool.name:$AppPoolName" 'Red'
+        }
+    }
+
+    Say "`nThe database backup and CSV archive, if taken, are in $WorkDir" 'Yellow'
+    Say "The database itself is unchanged unless Step 7 reported a deletion." 'Yellow'
     throw
 }
 finally {
