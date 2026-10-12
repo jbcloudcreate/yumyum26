@@ -34,19 +34,20 @@ The app references `Microsoft.Data.Sqlite` 10.0.11, which targets .NET 10 and
 **cannot be loaded by Windows PowerShell 5.1**. The app's own DLLs are therefore
 not usable from a script. Use the standalone SQLite CLI instead.
 
-1. From <https://sqlite.org/download.html> download **`sqlite-tools-win-x64`**.
-2. Extract `sqlite3.exe` — a single ~1.5 MB binary. Nothing is installed and
-   nothing is written to the registry.
-3. Place it beside the script, or pass `-SqliteExe <path>`.
+**On this server it is already in place at `C:\temp\sqlite3.exe`.** The script
+auto-detects that location, so `-SqliteExe` is optional. Pass it explicitly if
+you move the binary.
 
-Route it to the server through your usual GitHub path if direct download is
-blocked.
+Search order: script folder → working folder → `C:\temp\` → `PATH`.
 
 **Verify before use:**
 
 ```powershell
-.\sqlite3.exe -version
+C:\temp\sqlite3.exe -version
 ```
+
+The script prints the version it resolved at Step 2, so you can confirm from
+the transcript which binary actually ran.
 
 ---
 
@@ -146,6 +147,8 @@ and CSV archive in the working folder.
 | Database is sound afterwards | `PRAGMA integrity_check` |
 | Full record of the operation | `Start-Transcript` for the whole run |
 | Right database | Aborts unless an `AuditLog` table is present |
+| A failing SQL statement cannot pass as success | Every `sqlite3.exe` call checks the exit code and surfaces stderr. PowerShell does **not** throw on native command failure, so without this a failed `DELETE` would be reported as a clean run |
+| The site is never left down | If the run fails after the pool was stopped, the pool is restarted automatically; if that also fails you get the exact `appcmd` line to run |
 | App is genuinely stopped | Pool name validated, then stop confirmed via `/text:state` before any delete |
 
 ---
@@ -177,10 +180,10 @@ appcmd stop apppool /apppool.name:SignageFeedAdminPool
 
 Copy-Item 'E:\signagefeedadmin\data\feed.db' "E:\SignageAdmin\feed-backup-$(Get-Date -f yyyyMMdd-HHmmss).db"
 
-.\sqlite3.exe -header -csv 'E:\signagefeedadmin\data\feed.db' `
+C:\temp\sqlite3.exe -header -csv 'E:\signagefeedadmin\data\feed.db' `
   "SELECT * FROM AuditLog WHERE TimestampUtc < '2026-10-13T00:00:00Z' AND Action <> 'Purge';" > archive.csv
 
-.\sqlite3.exe 'E:\signagefeedadmin\data\feed.db' @"
+C:\temp\sqlite3.exe 'E:\signagefeedadmin\data\feed.db' @"
 BEGIN;
 DELETE FROM AuditLog WHERE TimestampUtc < '2026-10-13T00:00:00Z' AND Action <> 'Purge';
 INSERT INTO AuditLog (FeedId, TimestampUtc, UserName, Action, ItemId, Summary)
