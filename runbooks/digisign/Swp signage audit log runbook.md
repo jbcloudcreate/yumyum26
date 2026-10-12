@@ -2,7 +2,12 @@
 
 **Server:** `swpapp-digisign.swp-rest.police.int`
 **Application:** `/signageadmin` (Default Web Site)
-**Database:** `<app path>\App_Data\feed.db` (SQLite, from `Feed:DbPath`)
+**Database:** `E:\signagefeedadmin\data\feed.db` (SQLite)
+
+> The deployed `Feed:DbPath` points outside the application folder, so it is
+> **not** the repository default of `App_Data\feed.db`. The script reads
+> `Feed:DbPath` from the deployed `appsettings*.json` rather than assuming,
+> and `-DbPath` overrides everything.
 
 > **No redeployment.** Everything here operates on the SQLite database file.
 > The application binaries, `web.config` and IIS configuration are untouched.
@@ -50,13 +55,26 @@ blocked.
 Clears your POC and test entries so the datacentre team's trail starts clean
 at go-live.
 
+### 3.0 Confirm the app pool name
+
+```powershell
+appcmd list apppool
+```
+
+Pass the right one with `-AppPoolName`. If it does not match, the script stops
+**before deleting anything** and lists the pools that do exist.
+
 ### 3.1 Dry run first — changes nothing
 
 ```powershell
 cd E:\SignageAdmin\AuditMaintenance
 
-.\Clear-SignageAuditLog.ps1 -Before '2026-10-13'
+.\Clear-SignageAuditLog.ps1 -DbPath 'E:\signagefeedadmin\data\feed.db' -Before '2026-10-13'
 ```
+
+`-DbPath` is the reliable option here, since the database sits outside the
+application folder. Omit it only if you want the script to read `Feed:DbPath`
+from the deployed config itself.
 
 Reports the total, what is in scope, what will remain, and a per-feed
 breakdown with date ranges. **It still takes the backup and writes the CSV
@@ -68,7 +86,7 @@ what you intended, adjust `-Before` and run again.
 ### 3.2 Execute
 
 ```powershell
-.\Clear-SignageAuditLog.ps1 -Before '2026-10-13' -Execute
+.\Clear-SignageAuditLog.ps1 -DbPath 'E:\signagefeedadmin\data\feed.db' -Before '2026-10-13' -Execute
 ```
 
 Sequence: backup → CSV archive → verify archive matches scope → stop app pool →
@@ -76,6 +94,8 @@ delete → write purge record → `VACUUM` → verify counts → `PRAGMA integri
 → start app pool → smoke test `/signageadmin/Audit`.
 
 ### 3.3 Scope options
+
+All of these take `-DbPath 'E:\signagefeedadmin\data\feed.db'` as well.
 
 | Need | Command |
 |---|---|
@@ -97,7 +117,7 @@ Keeps the log bounded without anyone having to remember. Same script.
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument '-NoProfile -ExecutionPolicy Bypass -File "E:\SignageAdmin\AuditMaintenance\Clear-SignageAuditLog.ps1" -Before ([datetime]::UtcNow.AddMonths(-12)) -Execute'
+    -Argument '-NoProfile -ExecutionPolicy Bypass -File "E:\SignageAdmin\AuditMaintenance\Clear-SignageAuditLog.ps1" -DbPath "E:\signagefeedadmin\data\feed.db" -Before ([datetime]::UtcNow.AddMonths(-12)) -Execute'
 
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 02:00
 
@@ -125,6 +145,8 @@ and CSV archive in the working folder.
 | Deleted data is not recoverable from free pages | `VACUUM` after delete |
 | Database is sound afterwards | `PRAGMA integrity_check` |
 | Full record of the operation | `Start-Transcript` for the whole run |
+| Right database | Aborts unless an `AuditLog` table is present |
+| App is genuinely stopped | Pool name validated, then stop confirmed via `/text:state` before any delete |
 
 ---
 
@@ -137,7 +159,7 @@ To restore:
 appcmd stop apppool /apppool.name:SignageFeedAdminPool
 
 Copy-Item 'E:\SignageAdmin\AuditMaintenance\feed-<stamp>.db' `
-          '<app path>\App_Data\feed.db' -Force
+          'E:\signagefeedadmin\data\feed.db' -Force
 
 appcmd start apppool /apppool.name:SignageFeedAdminPool
 ```
@@ -153,12 +175,12 @@ If you would rather not run the script:
 ```powershell
 appcmd stop apppool /apppool.name:SignageFeedAdminPool
 
-Copy-Item '<app path>\App_Data\feed.db' "E:\SignageAdmin\feed-backup-$(Get-Date -f yyyyMMdd-HHmmss).db"
+Copy-Item 'E:\signagefeedadmin\data\feed.db' "E:\SignageAdmin\feed-backup-$(Get-Date -f yyyyMMdd-HHmmss).db"
 
-.\sqlite3.exe -header -csv '<app path>\App_Data\feed.db' `
+.\sqlite3.exe -header -csv 'E:\signagefeedadmin\data\feed.db' `
   "SELECT * FROM AuditLog WHERE TimestampUtc < '2026-10-13T00:00:00Z' AND Action <> 'Purge';" > archive.csv
 
-.\sqlite3.exe '<app path>\App_Data\feed.db' @"
+.\sqlite3.exe 'E:\signagefeedadmin\data\feed.db' @"
 BEGIN;
 DELETE FROM AuditLog WHERE TimestampUtc < '2026-10-13T00:00:00Z' AND Action <> 'Purge';
 INSERT INTO AuditLog (FeedId, TimestampUtc, UserName, Action, ItemId, Summary)
