@@ -20,6 +20,11 @@
     Physical path of the deployed application (the folder containing
     App_Data\feed.db). Discovered via appcmd if omitted.
 
+.PARAMETER DbPath
+    Full path to feed.db. Use this when the database does not live under the
+    application folder, e.g. 'E:\signagefeedadmin\data\feed.db'. Takes
+    precedence over -AppPath and skips all discovery.
+
 .PARAMETER Before
     Delete entries with TimestampUtc strictly older than this UTC date.
 
@@ -35,6 +40,10 @@
     Perform the deletion. Without this the script only reports.
 
 .EXAMPLE
+    .\Clear-SignageAuditLog.ps1 -DbPath 'E:\signagefeedadmin\data\feed.db' -Before '2026-10-13'
+    Dry run against a database outside the application folder.
+
+.EXAMPLE
     .\Clear-SignageAuditLog.ps1 -Before '2026-10-13'
     Dry run: shows what a pre-handover purge would remove.
 
@@ -47,9 +56,12 @@
     Rolling 12-month retention trim. Suitable for a scheduled task.
 #>
 
+#.\Clear-SignageAuditLog.ps1 -DbPath 'E:\signagefeedadmin\data\feed.db' -Before '2026-10-05'
+
 [CmdletBinding(DefaultParameterSetName = 'ByDate')]
 param(
     [string] $AppPath,
+    [string] $DbPath,
 
     [Parameter(ParameterSetName = 'ByDate')]
     [datetime] $Before,
@@ -79,20 +91,77 @@ try {
     # ---------------------------------------------------------------- 1. locate
     Mark 'Step 1 - locate the application and database'
 
-    if (-not $AppPath) {
-        $appcmd = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
-        if (-not (Test-Path $appcmd)) { throw "appcmd not found. Pass -AppPath explicitly." }
-        $raw = & $appcmd list vdir /text:physicalPath |
-               Where-Object { $_ -match 'signageadmin' } | Select-Object -First 1
-        if (-not $raw) { throw "Could not discover the app path. Pass -AppPath explicitly." }
-        $AppPath = $raw.Trim()
+    if ($DbPath) {
+        # Explicit path wins outright. Nothing is inferred.
+        if (-not (Test-Path $DbPath)) { throw "Database not found at the -DbPath given: $DbPath" }
+        $dbPath = (Resolve-Path $DbPath).Path
+        Say "  Database : $dbPath  (from -DbPath)"
     }
-    Say "  App path : $AppPath"
+    else {
+        if (-not $AppPath) {
+            $appcmd = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
+            if (-not (Test-Path $appcmd)) { throw "appcmd not found. Pass -AppPath or -DbPath explicitly." }
+            $raw = & $appcmd list vdir /text:physicalPath |
+                   Where-Object { $_ -match 'signageadmin' } | Select-Object -First 1
+            if (-not $raw) { throw "Could not discover the app path. Pass -AppPath or -DbPath explicitly." }
+            $AppPath = $raw.Trim()
+        }
+        Say "  App path : $AppPath"
 
-    $dbPath = Join-Path (Join-Path $AppPath 'App_Data') 'feed.db'
-    if (-not (Test-Path $dbPath)) { throw "Database not found at $dbPath" }
-    Say "  Database : $dbPath"
+        # The database location is whatever Feed:DbPath says in the DEPLOYED
+        # config, which is not necessarily the repository default of
+        # App_Data\feed.db. Read it rather than assume it. Environment-specific
+        # files win, matching ASP.NET Core's own precedence.
+        $dbPath = $null
+        foreach ($cfgName in 'appsettings.Production.json', 'appsettings.json') {
+            $cfgFile = Join-Path $AppPath $cfgName
+            if (-not (Test-Path $cfgFile)) { continue }
+            try   { $configured = (Get-Content $cfgFile -Raw | ConvertFrom-Json).Feed.DbPath }
+            catch { Say "  (could not parse $cfgName - skipping)" 'Yellow'; continue }
+            if (-not $configured) { continue }
+
+            # An absolute path is used as-is; a relative one resolves against
+            # the application root, exactly as the app itself resolves it.
+            $candidate = if ([System.IO.Path]::IsPathRooted($configured)) { $configured }
+                         else { Join-Path $AppPath $configured }
+            Say "  Config   : $cfgName -> Feed:DbPath = '$configured'"
+            if (Test-Path $candidate) { $dbPath = (Resolve-Path $candidate).Path; break }
+            Say "             (not present at $candidate)" 'Yellow'
+        }
+
+        # Last resort: look in the usual places before giving up.
+        if (-not $dbPath) {
+            $guesses = @(
+                (Join-Path (Join-Path $AppPath 'App_Data') 'feed.db'),
+                (Join-Path (Join-Path $AppPath 'Data') 'feed.db'),
+                (Join-Path $AppPath 'feed.db')
+            )
+            $dbPath = $guesses | Where-Object { Test-Path $_ } |
+                      Select-Object -First 1 | ForEach-Object { (Resolve-Path $_).Path }
+            if ($dbPath) { Say "  Found by fallback search" 'Yellow' }
+        }
+
+        if (-not $dbPath) {
+            throw @"
+Could not locate feed.db.
+
+  Searched under : $AppPath
+  Checked        : Feed:DbPath in appsettings*.json, then App_Data\, Data\, app root
+
+  Pass the path directly instead, e.g.
+      -DbPath 'E:\signagefeedadmin\data\feed.db'
+
+  To find it:
+      Get-ChildItem E:\ -Filter feed.db -Recurse -ErrorAction SilentlyContinue |
+          Select-Object FullName, Length, LastWriteTime
+"@
+        }
+        Say "  Database : $dbPath"
+    }
+
     Say ("  Size     : {0:N0} bytes" -f (Get-Item $dbPath).Length)
+    Say ("  Modified : {0}" -f (Get-Item $dbPath).LastWriteTime)
+
 
     # ---------------------------------------------------------------- 2. sqlite
     Mark 'Step 2 - locate sqlite3.exe'
@@ -118,6 +187,16 @@ sqlite3.exe not found.
     Say "  Version  : $(& $SqliteExe -version)"
 
     function Sql([string] $query) { & $SqliteExe $dbPath $query }
+
+    # Confirm this is really the signage database before going near it. A
+    # mistyped -DbPath pointing at some other SQLite file would otherwise
+    # fail later, after the backup and with the app pool already stopped.
+    $tables = Sql "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+    if ($tables -notcontains 'AuditLog') {
+        throw "No AuditLog table in $dbPath. Tables present: $($tables -join ', '). Wrong database?"
+    }
+    Say "  Tables   : $($tables -join ', ')"
+    Say "  AuditLog table confirmed" 'Green'
 
     # ---------------------------------------------------------------- 3. scope
     Mark 'Step 3 - determine scope'
@@ -213,9 +292,32 @@ sqlite3.exe not found.
     }
 
     Mark 'Step 6 - stop the application'
-    & (Join-Path $env:windir 'system32\inetsrv\appcmd.exe') stop apppool /apppool.name:$AppPoolName
+
+    $appcmdExe = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
+
+    # Verify the pool exists before trying to stop it. appcmd returns a
+    # non-terminating error for an unknown pool, which would otherwise let the
+    # script delete rows while the application was still running and writing.
+    $pools = & $appcmdExe list apppool /text:name
+    if ($pools -notcontains $AppPoolName) {
+        throw @"
+App pool '$AppPoolName' not found on this server.
+
+  Pools present:
+$($pools | ForEach-Object { "    $_" } | Out-String)
+  Re-run with -AppPoolName '<correct name>'.
+  Nothing has been deleted. The backup and archive are in $WorkDir
+"@
+    }
+
+    & $appcmdExe stop apppool /apppool.name:$AppPoolName
     Start-Sleep -Seconds 3
-    Say "  App pool '$AppPoolName' stopped"
+
+    $state = & $appcmdExe list apppool $AppPoolName /text:state
+    Say "  App pool '$AppPoolName' state: $state"
+    if ($state -ne 'Stopped') {
+        throw "App pool did not stop (state: $state). Not deleting while the app may be writing."
+    }
 
     # ---------------------------------------------------------------- 7. delete
     Mark 'Step 7 - delete, record the purge, reclaim'
@@ -262,9 +364,9 @@ COMMIT;
 
     # ---------------------------------------------------------------- 9. restart
     Mark 'Step 9 - restart and smoke test'
-    & (Join-Path $env:windir 'system32\inetsrv\appcmd.exe') start apppool /apppool.name:$AppPoolName
+    & $appcmdExe start apppool /apppool.name:$AppPoolName
     Start-Sleep -Seconds 3
-    Say "  App pool started"
+    Say "  App pool state: $(& $appcmdExe list apppool $AppPoolName /text:state)"
 
     try {
         $url = 'https://swpapp-digisign.swp-rest.police.int/signageadmin/Audit'
