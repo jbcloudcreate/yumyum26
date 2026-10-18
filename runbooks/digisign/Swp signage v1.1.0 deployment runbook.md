@@ -76,6 +76,31 @@ $appPath = '<PHYSICAL PATH OF /signageadmin>'
 $dbPath  = 'E:\signagefeedadmin\data\feed.db'
 ```
 
+**Finding the app pool name and the physical path** — both are specific to this
+server, so look them up rather than assuming:
+
+```powershell
+# every virtual directory with its folder on disk (you will see /signageadmin and /feedhub)
+& "$env:windir\system32\inetsrv\appcmd.exe" list vdir
+
+# just this app's folder (the trailing slash is required for a vdir)
+& "$env:windir\system32\inetsrv\appcmd.exe" list vdir "Default Web Site/signageadmin/" /text:physicalPath
+
+# the app pools
+& "$env:windir\system32\inetsrv\appcmd.exe" list apppool
+```
+
+Sanity check the path before using it — the right folder contains the running
+application:
+
+```powershell
+Get-ChildItem $appPath | Where-Object Name -in 'SignageFeedAdmin.dll','web.config'
+```
+
+Both must be listed. If they are not, you have the wrong folder — `$appPath`
+is the folder IIS serves, not its parent and not the `publish` folder you
+build into locally.
+
 ---
 
 ## 1. Build and test locally — before touching the server
@@ -444,6 +469,22 @@ $appPath = '<PHYSICAL PATH OF /signageadmin>'
 $dbPath  = 'E:\signagefeedadmin\data\feed.db'
 $deploy  = 'E:\SignageAdmin\Deploy'
 ```
+
+If you do not have the pool name or the path to hand:
+
+```powershell
+& "$env:windir\system32\inetsrv\appcmd.exe" list apppool
+& "$env:windir\system32\inetsrv\appcmd.exe" list vdir "Default Web Site/signageadmin/" /text:physicalPath
+```
+
+Confirm it is the right folder before restoring over it:
+
+```powershell
+Get-ChildItem $appPath | Where-Object Name -in 'SignageFeedAdmin.dll','web.config'
+```
+
+Both must be listed. Restoring over the wrong folder is far worse than the
+problem you are fixing.
 
 Find the backups — the newest pair is the one from this deployment:
 
