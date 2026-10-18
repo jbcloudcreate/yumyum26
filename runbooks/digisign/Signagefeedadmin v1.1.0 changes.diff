@@ -1,0 +1,933 @@
+Only in src/SignageFeedAdmin/App_Data: changelog.json
+diff -ru pristine/SignageFeedAdmin/Data/FeedRepository.cs src/SignageFeedAdmin/Data/FeedRepository.cs
+--- pristine/SignageFeedAdmin/Data/FeedRepository.cs	2026-10-18 17:26:05.726534446 +0100
++++ src/SignageFeedAdmin/Data/FeedRepository.cs	2026-10-18 17:30:03.474756159 +0100
+@@ -42,7 +42,10 @@
+                 FeedId TEXT NOT NULL DEFAULT '',
+                 Description TEXT NOT NULL,
+                 PubDateUtc TEXT NOT NULL,
+-                IsActive INTEGER NOT NULL DEFAULT 1
++                IsActive INTEGER NOT NULL DEFAULT 1,
++                -- Comma-separated location ids, e.g. 'hq,fw'. EMPTY MEANS
++                -- EVERY LOCATION - see FeedItem.Locations for why.
++                Locations TEXT NOT NULL DEFAULT ''
+             );
+ 
+             CREATE TABLE IF NOT EXISTS AuditLog (
+@@ -64,6 +67,12 @@
+         MigrateAddFeedId(conn, "FeedItems");
+         MigrateAddFeedId(conn, "AuditLog");
+ 
++        // Databases predating location targeting have no Locations column.
++        // The default of '' means "every location", so every existing item
++        // keeps appearing on every site's ticker after the upgrade. Anything
++        // else would have silently emptied tickers on deployment.
++        MigrateAddColumn(conn, "FeedItems", "Locations", "TEXT NOT NULL DEFAULT ''");
++
+         var index = conn.CreateCommand();
+         index.CommandText = """
+             CREATE INDEX IF NOT EXISTS IX_FeedItems_FeedId ON FeedItems (FeedId, IsActive, PubDateUtc);
+@@ -89,6 +98,20 @@
+         backfill.ExecuteNonQuery();
+     }
+ 
++    /// <summary>
++    /// Adds a column if it is not already there. Safe to run on every start
++    /// and safe to redeploy over, like MigrateAddFeedId above.
++    /// </summary>
++    private static void MigrateAddColumn(SqliteConnection conn, string table,
++                                         string column, string definition)
++    {
++        if (ColumnExists(conn, table, column)) return;
++
++        var add = conn.CreateCommand();
++        add.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
++        add.ExecuteNonQuery();
++    }
++
+     private static bool ColumnExists(SqliteConnection conn, string table, string column)
+     {
+         var cmd = conn.CreateCommand();
+@@ -111,8 +134,8 @@
+         conn.Open();
+         var cmd = conn.CreateCommand();
+         cmd.CommandText = activeOnly
+-            ? "SELECT Id, FeedId, Description, PubDateUtc, IsActive FROM FeedItems WHERE FeedId = $feed AND IsActive = 1 ORDER BY PubDateUtc DESC"
+-            : "SELECT Id, FeedId, Description, PubDateUtc, IsActive FROM FeedItems WHERE FeedId = $feed ORDER BY PubDateUtc DESC";
++            ? "SELECT Id, FeedId, Description, PubDateUtc, IsActive, Locations FROM FeedItems WHERE FeedId = $feed AND IsActive = 1 ORDER BY PubDateUtc DESC"
++            : "SELECT Id, FeedId, Description, PubDateUtc, IsActive, Locations FROM FeedItems WHERE FeedId = $feed ORDER BY PubDateUtc DESC";
+         cmd.Parameters.AddWithValue("$feed", feedId);
+ 
+         var items = new List<FeedItem>();
+@@ -125,7 +148,8 @@
+                 FeedId = reader.GetString(1),
+                 Description = reader.GetString(2),
+                 PubDateUtc = ParseUtc(reader.GetString(3)),
+-                IsActive = reader.GetInt32(4) == 1
++                IsActive = reader.GetInt32(4) == 1,
++                Locations = ParseLocations(reader.IsDBNull(5) ? null : reader.GetString(5))
+             });
+         }
+         return items;
+@@ -142,7 +166,7 @@
+         using var conn = new SqliteConnection(_connectionString);
+         conn.Open();
+         var cmd = conn.CreateCommand();
+-        cmd.CommandText = "SELECT Id, FeedId, Description, PubDateUtc, IsActive FROM FeedItems WHERE FeedId = $feed AND Id = $id";
++        cmd.CommandText = "SELECT Id, FeedId, Description, PubDateUtc, IsActive, Locations FROM FeedItems WHERE FeedId = $feed AND Id = $id";
+         cmd.Parameters.AddWithValue("$feed", feedId);
+         cmd.Parameters.AddWithValue("$id", id);
+ 
+@@ -155,7 +179,8 @@
+             FeedId = reader.GetString(1),
+             Description = reader.GetString(2),
+             PubDateUtc = ParseUtc(reader.GetString(3)),
+-            IsActive = reader.GetInt32(4) == 1
++            IsActive = reader.GetInt32(4) == 1,
++            Locations = ParseLocations(reader.IsDBNull(5) ? null : reader.GetString(5))
+         };
+     }
+ 
+@@ -169,12 +194,13 @@
+         // never be moved between feeds by a crafted request - the update
+         // simply affects no rows.
+         cmd.CommandText = """
+-            INSERT INTO FeedItems (Id, FeedId, Description, PubDateUtc, IsActive)
+-            VALUES ($id, $feed, $desc, $pubDate, $active)
++            INSERT INTO FeedItems (Id, FeedId, Description, PubDateUtc, IsActive, Locations)
++            VALUES ($id, $feed, $desc, $pubDate, $active, $locations)
+             ON CONFLICT(Id) DO UPDATE SET
+                 Description = excluded.Description,
+                 PubDateUtc = excluded.PubDateUtc,
+-                IsActive = excluded.IsActive
++                IsActive = excluded.IsActive,
++                Locations = excluded.Locations
+             WHERE FeedItems.FeedId = excluded.FeedId;
+             """;
+         cmd.Parameters.AddWithValue("$id", item.Id ?? "");
+@@ -182,6 +208,7 @@
+         cmd.Parameters.AddWithValue("$desc", item.Description ?? "");
+         cmd.Parameters.AddWithValue("$pubDate", item.PubDateUtc.ToString("o"));
+         cmd.Parameters.AddWithValue("$active", item.IsActive ? 1 : 0);
++        cmd.Parameters.AddWithValue("$locations", FormatLocations(item.Locations));
+         cmd.ExecuteNonQuery();
+     }
+ 
+@@ -256,6 +283,32 @@
+         return entries;
+     }
+ 
++    /// <summary>
++    /// Locations are stored as a comma-separated list in one column rather
++    /// than a join table. A feed has a handful of sites at most, the values
++    /// are only ever read as a whole set, and keeping it in the row avoids a
++    /// second query on every publish.
++    /// </summary>
++    private static List<string> ParseLocations(string? raw)
++    {
++        if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
++        return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
++                  .Select(s => s.ToLowerInvariant())
++                  .Distinct(StringComparer.OrdinalIgnoreCase)
++                  .ToList();
++    }
++
++    private static string FormatLocations(IEnumerable<string>? locations)
++    {
++        if (locations is null) return "";
++        var cleaned = locations
++            .Where(s => !string.IsNullOrWhiteSpace(s))
++            .Select(s => s.Trim().ToLowerInvariant())
++            .Distinct(StringComparer.OrdinalIgnoreCase)
++            .ToList();
++        return string.Join(",", cleaned);
++    }
++
+     // Values are stored with "o" (round-trip). RoundtripKind makes the
+     // round-trip explicit rather than relying on the ambient culture.
+     private static DateTime ParseUtc(string value)
+diff -ru pristine/SignageFeedAdmin/Models/FeedDefinition.cs src/SignageFeedAdmin/Models/FeedDefinition.cs
+--- pristine/SignageFeedAdmin/Models/FeedDefinition.cs	2026-10-18 17:26:05.726883851 +0100
++++ src/SignageFeedAdmin/Models/FeedDefinition.cs	2026-10-18 17:29:16.205496420 +0100
+@@ -31,4 +31,17 @@
+ 
+     /// <summary>RSS channel description.</summary>
+     public string ChannelDescription { get; set; } = "";
++
++    /// <summary>
++    /// Physical sites this feed is split across. Empty for a feed that
++    /// publishes a single file to every player, which is how all four feeds
++    /// behaved before location targeting existed.
++    /// </summary>
++    public List<FeedLocation> Locations { get; set; } = new();
++
++    /// <summary>True when this feed is split across sites.</summary>
++    public bool HasLocations => Locations.Count > 0;
++
++    /// <summary>Configured location ids, for validating what a form posted.</summary>
++    public IEnumerable<string> LocationIds => Locations.Select(l => l.Id);
+ }
+diff -ru pristine/SignageFeedAdmin/Models/FeedItem.cs src/SignageFeedAdmin/Models/FeedItem.cs
+--- pristine/SignageFeedAdmin/Models/FeedItem.cs	2026-10-18 17:26:05.726955800 +0100
++++ src/SignageFeedAdmin/Models/FeedItem.cs	2026-10-18 17:29:25.213496214 +0100
+@@ -15,4 +15,30 @@
+     public string Description { get; set; } = "";
+     public DateTime PubDateUtc { get; set; } = DateTime.UtcNow;
+     public bool IsActive { get; set; } = true;
++
++    /// <summary>
++    /// Which of the feed's locations this item is published to.
++    ///
++    /// EMPTY MEANS EVERY LOCATION. That is deliberate: it is what every row
++    /// written before location targeting existed means, and what a feed with
++    /// no locations configured will always mean. Treating empty as "nowhere"
++    /// would have silently emptied every ticker on upgrade.
++    /// </summary>
++    public List<string> Locations { get; set; } = new();
++
++    /// <summary>
++    /// Whether this item should appear in the given location's feed.
++    /// </summary>
++    public bool TargetsLocation(string locationId)
++        => Locations.Count == 0
++           || Locations.Contains(locationId, StringComparer.OrdinalIgnoreCase);
++
++    /// <summary>
++    /// Whether this item is unrestricted - it reaches every one of the given
++    /// locations. Only these items go into the feed's combined file, which
++    /// any player might still be pointing at.
++    /// </summary>
++    public bool TargetsEvery(IEnumerable<string> locationIds)
++        => Locations.Count == 0
++           || locationIds.All(id => Locations.Contains(id, StringComparer.OrdinalIgnoreCase));
+ }
+Only in src/SignageFeedAdmin/Models: FeedLocation.cs
+Only in src/SignageFeedAdmin/Pages: Changelog.cshtml
+Only in src/SignageFeedAdmin/Pages: Changelog.cshtml.cs
+diff -ru pristine/SignageFeedAdmin/Pages/Edit.cshtml src/SignageFeedAdmin/Pages/Edit.cshtml
+--- pristine/SignageFeedAdmin/Pages/Edit.cshtml	2026-10-18 17:26:05.727463309 +0100
++++ src/SignageFeedAdmin/Pages/Edit.cshtml	2026-10-18 20:17:49.547838532 +0100
+@@ -14,6 +14,35 @@
+     <label>Description</label>
+     <textarea asp-for="Input.Description" maxlength="2000" required></textarea>
+ 
++    @if (Model.Feed.HasLocations)
++    {
++        <fieldset class="locations">
++            <legend>Where should this appear?</legend>
++            <p class="field-hint">
++                Choose one. An item set to a single site will not appear on the
++                other site's screens.
++            </p>
++
++            @foreach (var location in Model.Feed.Locations)
++            {
++                <label class="location-choice">
++                    @* Radios, not checkboxes - exactly one option applies.
++                       The name is the bound property path. *@
++                    <input type="radio" name="Input.LocationChoice" value="@location.Id"
++                           checked="@(Model.Input.LocationChoice == location.Id)" />
++                    <span>@location.Name only</span>
++                </label>
++            }
++
++            <label class="location-choice">
++                <input type="radio" name="Input.LocationChoice"
++                       value="@SignageFeedAdmin.Pages.EditModel.AllLocations"
++                       checked="@(Model.Input.LocationChoice == SignageFeedAdmin.Pages.EditModel.AllLocations)" />
++                <span><strong>All</strong> &ndash; every site</span>
++            </label>
++        </fieldset>
++    }
++
+     <button type="submit">Save</button>
+     <a class="btn" asp-page="/Feed" asp-route-feedId="@Model.Feed.Id">Cancel</a>
+ </form>
+diff -ru pristine/SignageFeedAdmin/Pages/Edit.cshtml.cs src/SignageFeedAdmin/Pages/Edit.cshtml.cs
+--- pristine/SignageFeedAdmin/Pages/Edit.cshtml.cs	2026-10-18 17:26:05.727483925 +0100
++++ src/SignageFeedAdmin/Pages/Edit.cshtml.cs	2026-10-18 20:17:37.235357306 +0100
+@@ -25,8 +25,25 @@
+     {
+         public string? Id { get; set; }
+         public string Description { get; set; } = "";
++
++        /// <summary>
++        /// Which radio was selected: a location id, or AllLocations.
++        ///
++        /// One choice, not a set of tickboxes - the user picks HQ, FW or All.
++        /// Validated against the feed's own configured list in OnPost, so an
++        /// invented value is refused rather than stored.
++        /// </summary>
++        public string LocationChoice { get; set; } = AllLocations;
+     }
+ 
++    /// <summary>
++    /// Radio value meaning "every location". Stored as an EMPTY location
++    /// list, which is what "everywhere" has always meant in the data - so an
++    /// All item automatically covers any site added later, and matches rows
++    /// written before location targeting existed.
++    /// </summary>
++    public const string AllLocations = "__all__";
++
+     [BindProperty]
+     public InputModel Input { get; set; } = new();
+ 
+@@ -35,6 +52,7 @@
+ 
+     public IActionResult OnGet(string? id)
+     {
++        // New item defaults to All, the widest and least surprising option.
+         if (string.IsNullOrEmpty(id)) return Page(); // add
+ 
+         var item = _service.GetItem(Feed.Id, id);
+@@ -45,7 +63,12 @@
+             return RedirectToPage("/Feed", new { feedId = Feed.Id });
+         }
+ 
+-        Input = new InputModel { Id = item.Id, Description = item.Description };
++        Input = new InputModel
++        {
++            Id = item.Id,
++            Description = item.Description,
++            LocationChoice = ChoiceFor(item)
++        };
+         return Page();
+     }
+ 
+@@ -53,12 +76,38 @@
+     {
+         var isNew = IsNew;
+ 
++        // Map the single radio choice onto the stored list.
++        //
++        // An unrecognised value is REFUSED, never quietly treated as All: a
++        // crafted or malformed post must not be able to widen an item onto
++        // every site's screens.
++        List<string> chosen;
++        if (!Feed.HasLocations)
++        {
++            chosen = new List<string>();
++        }
++        else if (Input.LocationChoice == AllLocations)
++        {
++            chosen = new List<string>();          // empty == every location
++        }
++        else if (Feed.LocationIds.Contains(Input.LocationChoice ?? "", StringComparer.OrdinalIgnoreCase))
++        {
++            chosen = new List<string> { Input.LocationChoice! };
++        }
++        else
++        {
++            ErrorMessage = "Choose where this item should appear.";
++            Input.LocationChoice = AllLocations;
++            return Page();
++        }
++
+         var item = new FeedItem
+         {
+             Id = string.IsNullOrEmpty(Input.Id) ? Guid.NewGuid().ToString("N") : Input.Id,
+             Description = Input.Description ?? "",
+             PubDateUtc = DateTime.UtcNow,
+-            IsActive = true
++            IsActive = true,
++            Locations = chosen
+         };
+ 
+         if (!isNew)
+@@ -77,9 +126,46 @@
+         catch (ArgumentException ex)
+         {
+             ErrorMessage = ex.Message;
++
++            // Leave Input.LocationChoice as posted, so a rejected save does
++            // not silently reset what they picked.
+             return Page();
+         }
+ 
+         return RedirectToPage("/Feed", new { feedId = Feed.Id });
+     }
++
++    /// <summary>
++    /// Which radio to preselect for an existing item.
++    ///
++    /// Empty, or covering every configured location, is All. A single stored
++    /// location selects that one. A stored subset of more than one - only
++    /// reachable on a feed with three or more sites, which radios cannot
++    /// express - selects the first and warns, rather than silently widening
++    /// the item to every site or narrowing it without saying so.
++    /// </summary>
++    private string ChoiceFor(FeedItem item)
++    {
++        if (!Feed.HasLocations) return AllLocations;
++
++        var ids = Feed.LocationIds.ToList();
++        if (item.Locations.Count == 0) return AllLocations;
++        if (ids.All(id => item.Locations.Contains(id, StringComparer.OrdinalIgnoreCase)))
++            return AllLocations;
++
++        var known = item.Locations
++            .Where(l => ids.Contains(l, StringComparer.OrdinalIgnoreCase))
++            .ToList();
++
++        if (known.Count == 0) return AllLocations;
++        if (known.Count > 1)
++        {
++            var names = Feed.Locations
++                .Where(l => known.Contains(l.Id, StringComparer.OrdinalIgnoreCase))
++                .Select(l => l.Name);
++            ErrorMessage = $"This item currently shows at {string.Join(" and ", names)}. "
++                         + "Saving will change it to whichever single option you select below.";
++        }
++        return known[0];
++    }
+ }
+diff -ru pristine/SignageFeedAdmin/Pages/Feed.cshtml src/SignageFeedAdmin/Pages/Feed.cshtml
+--- pristine/SignageFeedAdmin/Pages/Feed.cshtml	2026-10-18 17:26:05.727717767 +0100
++++ src/SignageFeedAdmin/Pages/Feed.cshtml	2026-10-18 17:32:37.822614900 +0100
+@@ -2,7 +2,23 @@
+ @model SignageFeedAdmin.Pages.FeedModel
+ 
+ <h1>@Model.Feed.Name</h1>
+-<p class="page-description">Items below are published to <code>@System.IO.Path.GetFileName(Model.Feed.OutputPath)</code>. Any change republishes the feed immediately.</p>
++@if (Model.Feed.HasLocations)
++{
++    <p class="page-description">
++        This feed publishes a separate file per site, and each site's screens show only its own:
++        @foreach (var loc in Model.Feed.Locations)
++        {
++            <text> </text><strong>@loc.Name</strong> <code>@System.IO.Path.GetFileName(loc.OutputPath)</code>
++        }
++        <br />
++        <code>@System.IO.Path.GetFileName(Model.Feed.OutputPath)</code> carries only items shown at every site.
++        Any change republishes all of them immediately.
++    </p>
++}
++else
++{
++    <p class="page-description">Items below are published to <code>@System.IO.Path.GetFileName(Model.Feed.OutputPath)</code>. Any change republishes the feed immediately.</p>
++}
+ <p>Signed in as <strong>@User.Identity?.Name</strong>@(Model.IsAdmin ? " (signage administrator)" : "")</p>
+ 
+ @if (!string.IsNullOrEmpty(Model.Message))
+@@ -13,17 +29,46 @@
+ <form method="post">
+     <table>
+         <thead>
+-            <tr><th>Description</th><th>Pub date (UTC)</th><th></th></tr>
++            <tr>
++                <th>Description</th>
++                @if (Model.Feed.HasLocations)
++                {
++                    <th>Shown at</th>
++                }
++                <th>Pub date (UTC)</th>
++                <th></th>
++            </tr>
+         </thead>
+         <tbody>
+         @if (!Model.Items.Any())
+         {
+-            <tr><td colspan="3">No active items yet.</td></tr>
++            <tr><td colspan="@(Model.Feed.HasLocations ? 4 : 3)">No active items yet.</td></tr>
+         }
+         @foreach (var item in Model.Items)
+         {
+             <tr>
+                 <td>@item.Description</td>
++                @if (Model.Feed.HasLocations)
++                {
++                    var shownAt = Model.Feed.Locations
++                        .Where(l => item.TargetsLocation(l.Id))
++                        .Select(l => l.Name)
++                        .ToList();
++                    var everywhere = shownAt.Count == Model.Feed.Locations.Count;
++                    <td>
++                        @if (everywhere)
++                        {
++                            <span class="tag tag-all">All sites</span>
++                        }
++                        else
++                        {
++                            foreach (var name in shownAt)
++                            {
++                                <span class="tag">@name</span>
++                            }
++                        }
++                    </td>
++                }
+                 <td>@item.PubDateUtc.ToString("yyyy-MM-dd HH:mm")</td>
+                 <td>
+                     <a asp-page="/Edit" asp-route-feedId="@Model.Feed.Id" asp-route-id="@item.Id">Edit</a>
+diff -ru pristine/SignageFeedAdmin/Pages/Shared/_Layout.cshtml src/SignageFeedAdmin/Pages/Shared/_Layout.cshtml
+--- pristine/SignageFeedAdmin/Pages/Shared/_Layout.cshtml	2026-10-18 17:26:05.728034776 +0100
++++ src/SignageFeedAdmin/Pages/Shared/_Layout.cshtml	2026-10-18 17:44:56.225474920 +0100
+@@ -1,4 +1,5 @@
+ @inject SignageFeedAdmin.Services.FeedCatalog Catalog
++@inject SignageFeedAdmin.Services.AppVersion AppVer
+ @inject IConfiguration Config
+ @{
+     // Read the current feed straight from the route rather than from the page
+@@ -51,6 +52,14 @@
+             <a href="@hubUrl">Return to the ICT Hub</a>
+             <span> &middot; </span>
+         }
++        @* Version links to the history page. asp-page resolves through this
++           app's PathBase, unlike the Hub link above which is site-rooted. *@
++        @* Parenthesised deliberately. Written as v@AppVer.Current, Razor's
++           email-address heuristic sees word@word.word and emits it as literal
++           text instead of transitioning to code. An explicit expression is
++           never treated as an email. *@
++        <a asp-page="/Changelog" class="version-link">v@(AppVer.Current)</a>
++        <span> &middot; </span>
+         <span>&copy; @DateTime.Now.Year SWP ICT</span>
+     </footer>
+ </body>
+diff -ru pristine/SignageFeedAdmin/Program.cs src/SignageFeedAdmin/Program.cs
+--- pristine/SignageFeedAdmin/Program.cs	2026-10-18 17:26:05.728421448 +0100
++++ src/SignageFeedAdmin/Program.cs	2026-10-18 17:45:22.493474319 +0100
+@@ -34,6 +34,12 @@
+ foreach (var feed in catalog.Feeds)
+ {
+     Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(feed.OutputPath))!);
++
++    // Each location writes its own file, which may sit in its own folder.
++    foreach (var location in feed.Locations)
++    {
++        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(location.OutputPath))!);
++    }
+ }
+ 
+ // --- Data Protection -------------------------------------------------------
+@@ -76,6 +82,46 @@
+ builder.Services.AddSingleton(new FeedAccess(catalog, adminGroup));
+ builder.Services.AddSingleton<FeedService>();
+ 
++// --- Version and changelog --------------------------------------------------
++// Two candidate locations, preferred first. Like the Data Protection key ring
++// above, the preferred copy sits OUTSIDE the publish folder so that deploying
++// - which deletes and replaces publish - does not revert an edited release
++// note. The copy shipped inside publish is the fallback, so a fresh
++// deployment still shows a history before anyone places the external file.
++//
++// A relative changelog path is resolved against ContentRootPath, because the
++// IIS worker process's working directory is not guaranteed to be the app
++// folder and a relative path would then resolve somewhere unexpected. The
++// database-adjacent candidate below uses Path.GetFullPath on dbPath, matching
++// exactly how the database itself is resolved further up, so the two always
++// agree on which directory that is.
++string Resolve(string p) =>
++    Path.IsPathRooted(p) ? p : Path.Combine(builder.Environment.ContentRootPath, p);
++
++var changelogCandidates = new List<string>();
++
++var configuredChangelog = config["Feed:ChangelogPath"];
++if (!string.IsNullOrWhiteSpace(configuredChangelog))
++{
++    changelogCandidates.Add(Resolve(configuredChangelog));
++}
++else
++{
++    // Default external location: beside the database, which already lives
++    // outside publish in production.
++    var dbDir = Path.GetDirectoryName(Path.GetFullPath(dbPath));
++    if (!string.IsNullOrWhiteSpace(dbDir))
++    {
++        changelogCandidates.Add(Path.Combine(dbDir, "changelog.json"));
++    }
++}
++
++changelogCandidates.Add(Resolve(Path.Combine("App_Data", "changelog.json")));
++
++builder.Services.AddSingleton(sp => new AppVersion(
++    changelogCandidates,
++    sp.GetService<ILogger<AppVersion>>()));
++
+ // Windows Authentication: IIS performs the NTLM/Kerberos handshake and hands
+ // this app an already-authenticated identity - the app never sees a password.
+ // Requires forwardWindowsAuthToken="true" in web.config.
+Only in src/SignageFeedAdmin/Services: AppVersion.cs
+diff -ru pristine/SignageFeedAdmin/Services/FeedCatalog.cs src/SignageFeedAdmin/Services/FeedCatalog.cs
+--- pristine/SignageFeedAdmin/Services/FeedCatalog.cs	2026-10-18 17:26:05.728630449 +0100
++++ src/SignageFeedAdmin/Services/FeedCatalog.cs	2026-10-18 17:30:29.766186792 +0100
+@@ -68,6 +68,39 @@
+             if (string.IsNullOrWhiteSpace(f.Name)) problems.Add($"feed '{label}' has no Name");
+             if (string.IsNullOrWhiteSpace(f.Group)) problems.Add($"feed '{label}' has no Group");
+             if (string.IsNullOrWhiteSpace(f.OutputPath)) problems.Add($"feed '{label}' has no OutputPath");
++
++            // --- locations -------------------------------------------------
++            // A feed may have none. If it has any, each needs a usable id and
++            // its own output file, for the same reason feeds do: a bad id
++            // becomes part of a filename and a database value, and a shared
++            // path means two feeds silently overwriting each other.
++            foreach (var loc in f.Locations)
++            {
++                var locLabel = string.IsNullOrWhiteSpace(loc.Id) ? "(missing Id)" : loc.Id;
++
++                if (string.IsNullOrWhiteSpace(loc.Id))
++                    problems.Add($"feed '{label}' has a location with no Id");
++                else if (!loc.Id.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
++                    problems.Add($"feed '{label}' location '{locLabel}' has an Id with characters other than letters, digits and hyphen");
++
++                if (string.IsNullOrWhiteSpace(loc.Name))
++                    problems.Add($"feed '{label}' location '{locLabel}' has no Name");
++                if (string.IsNullOrWhiteSpace(loc.OutputPath))
++                    problems.Add($"feed '{label}' location '{locLabel}' has no OutputPath");
++            }
++
++            var dupeLocIds = f.Locations.Where(l => !string.IsNullOrWhiteSpace(l.Id))
++                                        .GroupBy(l => l.Id, StringComparer.OrdinalIgnoreCase)
++                                        .Where(g => g.Count() > 1).Select(g => g.Key);
++            foreach (var d in dupeLocIds)
++                problems.Add($"feed '{label}' has duplicate location Id '{d}'");
++
++            // A single location is almost certainly a config mistake - it
++            // would restrict items to the only site that exists, which is
++            // the same as not restricting them, but with a second file to
++            // keep pointed at.
++            if (f.Locations.Count == 1)
++                problems.Add($"feed '{label}' has only one location ('{f.Locations[0].Id}'); configure two or more, or none at all");
+         }
+ 
+         var dupeIds = feeds.Where(f => !string.IsNullOrWhiteSpace(f.Id))
+@@ -76,11 +109,24 @@
+         foreach (var d in dupeIds) problems.Add($"duplicate feed Id '{d}'");
+ 
+         // Two feeds writing the same file would have them silently
+-        // overwriting each other's published content.
+-        var dupePaths = feeds.Where(f => !string.IsNullOrWhiteSpace(f.OutputPath))
+-                             .GroupBy(f => f.OutputPath, StringComparer.OrdinalIgnoreCase)
+-                             .Where(g => g.Count() > 1).Select(g => g.Key);
+-        foreach (var d in dupePaths) problems.Add($"two or more feeds share OutputPath '{d}'");
++        // overwriting each other's published content. Location files are in
++        // the same namespace, so they are checked together rather than
++        // separately - a location path colliding with a feed path is just as
++        // damaging, and would be the easy mistake to make when adding one.
++        var allPaths = feeds
++            .Where(f => !string.IsNullOrWhiteSpace(f.OutputPath))
++            .Select(f => (Path: f.OutputPath, Owner: $"feed '{f.Id}'"))
++            .Concat(feeds.SelectMany(f => f.Locations
++                .Where(l => !string.IsNullOrWhiteSpace(l.OutputPath))
++                .Select(l => (Path: l.OutputPath, Owner: $"feed '{f.Id}' location '{l.Id}'"))))
++            .ToList();
++
++        var dupePaths = allPaths
++            .GroupBy(x => x.Path, StringComparer.OrdinalIgnoreCase)
++            .Where(g => g.Count() > 1);
++        foreach (var g in dupePaths)
++            problems.Add($"OutputPath '{g.Key}' is used by more than one feed or location: "
++                         + string.Join(", ", g.Select(x => x.Owner)));
+ 
+         return problems;
+     }
+diff -ru pristine/SignageFeedAdmin/Services/FeedService.cs src/SignageFeedAdmin/Services/FeedService.cs
+--- pristine/SignageFeedAdmin/Services/FeedService.cs	2026-10-18 17:26:05.728746759 +0100
++++ src/SignageFeedAdmin/Services/FeedService.cs	2026-10-18 20:18:01.897056402 +0100
+@@ -44,7 +44,7 @@
+         // Set from the route argument, never from whatever the form posted.
+         item.FeedId = feed.Id;
+ 
+-        Validate(item);
++        Validate(item, feed);
+         _repo.UpsertItem(item);
+         _repo.AddAuditEntry(new AuditEntry
+         {
+@@ -52,7 +52,7 @@
+             UserName = userName,
+             Action = isNew ? "Create" : "Update",
+             ItemId = item.Id,
+-            Summary = $"{(isNew ? "Created" : "Updated")} item: {Summarize(item.Description)}"
++            Summary = $"{(isNew ? "Created" : "Updated")} item{DescribeTargeting(item, feed)}: {Summarize(item.Description)}"
+         });
+         Republish(feed, userName);
+     }
+@@ -87,29 +87,92 @@
+     {
+         foreach (var feed in _catalog.Feeds)
+         {
+-            _publisher.Publish(feed, _repo.GetActiveItems(feed.Id));
++            _publisher.PublishAllFor(feed, _repo.GetActiveItems(feed.Id));
+         }
+     }
+ 
+     private void Republish(FeedDefinition feed, string userName)
+     {
+         var items = _repo.GetActiveItems(feed.Id);
+-        _publisher.Publish(feed, items);
++        _publisher.PublishAllFor(feed, items);
++
++        string summary;
++        if (feed.HasLocations)
++        {
++            // Per-location counts, so the audit trail shows what each site's
++            // ticker actually received - not just the feed-wide total, which
++            // would hide a targeting mistake.
++            // Materialised once: LocationIds is a Select iterator, so passing
++            // it straight in would re-enumerate it for every item.
++            var ids = feed.LocationIds.ToList();
++
++            var perLocation = feed.Locations.Select(l =>
++                $"{l.Name} {items.Count(i => i.TargetsLocation(l.Id))}");
++            var everywhere = items.Count(i => i.TargetsEvery(ids));
++
++            summary = $"Republished {feed.Name}: {string.Join(", ", perLocation)}"
++                    + $" (combined file: {everywhere} unrestricted item(s))";
++        }
++        else
++        {
++            summary = $"Republished {feed.Name} feed with {items.Count} active item(s)";
++        }
++
+         _repo.AddAuditEntry(new AuditEntry
+         {
+             FeedId = feed.Id,
+             UserName = userName,
+             Action = "Publish",
+-            Summary = $"Republished {feed.Name} feed with {items.Count} active item(s)"
++            Summary = summary
+         });
+     }
+ 
+-    private void Validate(FeedItem item)
++    /// <summary>
++    /// " [HQ]" or " [HQ, Forward]" for a feed with locations, empty otherwise.
++    /// Recorded in the audit summary so a later question about which site saw
++    /// an item can be answered from the log alone.
++    /// </summary>
++    private static string DescribeTargeting(FeedItem item, FeedDefinition feed)
++    {
++        if (!feed.HasLocations) return "";
++
++        var names = feed.Locations
++            .Where(l => item.TargetsLocation(l.Id))
++            .Select(l => l.Name)
++            .ToList();
++
++        if (names.Count == 0) return " [no location]";
++        if (names.Count == feed.Locations.Count) return " [All sites]";
++        return $" [{string.Join(", ", names)}]";
++    }
++
++    private static void Validate(FeedItem item, FeedDefinition feed)
+     {
+         if (string.IsNullOrWhiteSpace(item.Description))
+             throw new ArgumentException("Description is required.");
+         if (item.Description.Length > 2000)
+             throw new ArgumentException("Description must be 2000 characters or fewer.");
++
++        if (feed.HasLocations)
++        {
++            // An EMPTY list is valid and means every location - that is what
++            // the All option stores, and what every row written before
++            // location targeting existed already means. The page layer is
++            // what guarantees the user made a deliberate choice; this layer
++            // only rejects locations that do not exist.
++            var unknown = item.Locations
++                .Where(id => !feed.LocationIds.Contains(id, StringComparer.OrdinalIgnoreCase))
++                .ToList();
++            if (unknown.Count > 0)
++                throw new ArgumentException(
++                    $"Unknown location(s): {string.Join(", ", unknown)}.");
++        }
++        else if (item.Locations.Count > 0)
++        {
++            // This feed publishes one file to everyone; a stored location
++            // would be silently ignored at publish time.
++            throw new ArgumentException($"The {feed.Name} feed has no locations configured.");
++        }
+     }
+ 
+     // Keeps audit log entries readable when Description runs long.
+diff -ru pristine/SignageFeedAdmin/Services/RssPublisher.cs src/SignageFeedAdmin/Services/RssPublisher.cs
+--- pristine/SignageFeedAdmin/Services/RssPublisher.cs	2026-10-18 17:26:05.728877061 +0100
++++ src/SignageFeedAdmin/Services/RssPublisher.cs	2026-10-18 17:45:17.673829461 +0100
+@@ -27,14 +27,63 @@
+         _channelLink = channelLink;
+     }
+ 
+-    public void Publish(FeedDefinition feed, IEnumerable<FeedItem> items)
++    /// <summary>
++    /// Writes every file this feed owns: one per location, plus the feed's
++    /// own combined file.
++    ///
++    /// The combined file is the one that existed before locations, and
++    /// players may still be pointing at it. It therefore carries ONLY items
++    /// that target every location - never a restricted one. A player that has
++    /// not yet been repointed keeps showing general items and can never
++    /// display content meant for another site.
++    /// </summary>
++    public void PublishAllFor(FeedDefinition feed, IEnumerable<FeedItem> items)
+     {
+-        var outputPath = Path.GetFullPath(feed.OutputPath);
++        var all = items as IList<FeedItem> ?? items.ToList();
++
++        if (!feed.HasLocations)
++        {
++            PublishUnfiltered(feed, all);
++            return;
++        }
++
++        var locationIds = feed.LocationIds.ToList();
++
++        foreach (var location in feed.Locations)
++        {
++            var forLocation = all.Where(i => i.TargetsLocation(location.Id)).ToList();
++            Write(location.OutputPath,
++                  string.IsNullOrWhiteSpace(location.ChannelTitle)
++                      ? feed.ChannelTitle
++                      : location.ChannelTitle,
++                  feed.ChannelDescription,
++                  forLocation);
++        }
++
++        var unrestricted = all.Where(i => i.TargetsEvery(locationIds)).ToList();
++        Write(feed.OutputPath, feed.ChannelTitle, feed.ChannelDescription, unrestricted);
++    }
++
++    /// <summary>
++    /// Writes EVERY given item to the feed's own file, unfiltered.
++    ///
++    /// Private on purpose. For a feed with locations this would put
++    /// site-restricted items into the combined file that un-repointed players
++    /// read - exactly the leak PublishAllFor exists to prevent. It is only
++    /// correct as the no-locations branch above. Callers want PublishAllFor.
++    /// </summary>
++    private void PublishUnfiltered(FeedDefinition feed, IEnumerable<FeedItem> items)
++        => Write(feed.OutputPath, feed.ChannelTitle, feed.ChannelDescription, items);
++
++    private void Write(string path, string channelTitle, string channelDescription,
++                       IEnumerable<FeedItem> items)
++    {
++        var outputPath = Path.GetFullPath(path);
+         var gate = _locks.GetOrAdd(outputPath, _ => new object());
+ 
+         lock (gate)
+         {
+-            var xml = BuildXml(feed, items);
++            var xml = BuildXml(channelTitle, channelDescription, items);
+             var dir = Path.GetDirectoryName(outputPath)!;
+             Directory.CreateDirectory(dir);
+ 
+@@ -64,12 +113,13 @@
+         }
+     }
+ 
+-    private XDocument BuildXml(FeedDefinition feed, IEnumerable<FeedItem> items)
++    private XDocument BuildXml(string channelTitle, string channelDescription,
++                               IEnumerable<FeedItem> items)
+     {
+         var channel = new XElement("channel",
+-            new XElement("title", feed.ChannelTitle),
++            new XElement("title", channelTitle),
+             new XElement("link", _channelLink),
+-            new XElement("description", feed.ChannelDescription),
++            new XElement("description", channelDescription),
+             new XElement("lastBuildDate", DateTime.UtcNow.ToString("R")),
+             items.Select(i => new XElement("item",
+                 new XElement("description", i.Description),
+diff -ru pristine/SignageFeedAdmin/SignageFeedAdmin.csproj src/SignageFeedAdmin/SignageFeedAdmin.csproj
+--- pristine/SignageFeedAdmin/SignageFeedAdmin.csproj	2026-10-18 17:26:05.728977651 +0100
++++ src/SignageFeedAdmin/SignageFeedAdmin.csproj	2026-10-18 17:44:51.901475018 +0100
+@@ -6,10 +6,33 @@
+     <ImplicitUsings>enable</ImplicitUsings>
+     <InvariantGlobalization>true</InvariantGlobalization>
+     <NoWarn>$(NoWarn);NU1903</NoWarn>
++
++    <!--
++      Bump this for every deployment, and add a matching entry to
++      App_Data/changelog.json. The footer reads this value from the compiled
++      assembly, so it always reflects the build actually running; the
++      changelog page flags it if the two fall out of step.
++    -->
++    <Version>1.1.0</Version>
+   </PropertyGroup>
+ 
+   <ItemGroup>
+     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+   </ItemGroup>
+ 
++  <ItemGroup>
++    <!--
++      The Web SDK already globs **\*.json into Content, which is how
++      appsettings.json reaches the publish folder. This is Update, NOT
++      Include: a second Include of a file the glob already matched fails the
++      build with NETSDK1022 (duplicate Content items).
++
++      It is here only to pin the copy behaviour explicitly, so the changelog
++      is also present in the build output when running locally.
++    -->
++    <Content Update="App_Data\changelog.json"
++             CopyToOutputDirectory="PreserveNewest"
++             CopyToPublishDirectory="PreserveNewest" />
++  </ItemGroup>
++
+ </Project>
+diff -ru pristine/SignageFeedAdmin/appsettings.json src/SignageFeedAdmin/appsettings.json
+--- pristine/SignageFeedAdmin/appsettings.json	2026-10-18 17:26:05.726165681 +0100
++++ src/SignageFeedAdmin/appsettings.json	2026-10-18 17:33:08.185491114 +0100
+@@ -30,7 +30,28 @@
+       "Group": "SWP-NET\\DC_SignageFeedUsers",
+       "OutputPath": "wwwroot/feeds/rss/datacenter.xml",
+       "ChannelTitle": "ICT Datacenter Team",
+-      "ChannelDescription": "Updates from the ICT Datacenter Team"
++      "ChannelDescription": "Updates from the ICT Datacenter Team",
++
++      "//Locations": [
++        "Each location publishes its own file and is a separate URL for the players at that site.",
++        "datacenter.xml above still publishes, but carries ONLY items shown at every location -",
++        "so a player not yet repointed shows general items and never site-restricted ones.",
++        "Remove this Locations array and the feed reverts to a single file for everyone."
++      ],
++      "Locations": [
++        {
++          "Id": "hq",
++          "Name": "HQ",
++          "OutputPath": "wwwroot/feeds/rss/datacenter-hq.xml",
++          "ChannelTitle": "ICT Datacenter Team - HQ"
++        },
++        {
++          "Id": "fw",
++          "Name": "FW",
++          "OutputPath": "wwwroot/feeds/rss/datacenter-fw.xml",
++          "ChannelTitle": "ICT Datacenter Team - FW"
++        }
++      ]
+     },
+     {
+       "Id": "news",
+diff -ru pristine/SignageFeedAdmin/wwwroot/site.css src/SignageFeedAdmin/wwwroot/site.css
+--- pristine/SignageFeedAdmin/wwwroot/site.css	2026-10-18 17:26:05.729495625 +0100
++++ src/SignageFeedAdmin/wwwroot/site.css	2026-10-18 17:32:53.837491442 +0100
+@@ -111,3 +111,33 @@
+     text-transform: uppercase;
+     letter-spacing: 0.04em;
+ }
++
++/* --- location targeting (Edit + Feed pages) ------------------------------ */
++.locations { border: 1px solid #cfd6dd; padding: 0.8rem 1rem 1rem; margin: 1rem 0; }
++.locations legend { font-weight: 600; padding: 0 0.4rem; }
++.field-hint { margin: 0 0 0.6rem; font-size: 0.9rem; color: #555; }
++.location-choice { display: inline-flex; align-items: center; gap: 0.4rem;
++                   margin-right: 1.4rem; font-weight: normal; cursor: pointer; }
++.location-choice input { width: auto; margin: 0; }
++
++.tag { display: inline-block; background: #eef2f6; border: 1px solid #cfd6dd;
++       border-radius: 3px; padding: 0.1rem 0.45rem; margin-right: 0.3rem;
++       font-size: 0.85rem; white-space: nowrap; }
++.tag-all { background: #e6f4ea; border-color: #b7dfc2; }
++
++/* --- version and changelog ----------------------------------------------- */
++.version-link { font-variant-numeric: tabular-nums; }
++
++.notice { padding: 0.6rem 1rem; margin-bottom: 1rem; border: 1px solid #cfd6dd;
++          background: #eef2f6; }
++.notice-warn { background: #fff8e1; border-color: #e8d492; }
++.notice-detail { font-size: 0.85rem; color: #555; word-break: break-word; }
++
++.release { border-top: 1px solid #e2e7ec; padding-top: 0.8rem; margin-top: 1.4rem; }
++.release h2 { margin: 0 0 0.2rem; font-size: 1.15rem; }
++.release-current h2 { color: #1f5c38; }
++.release-badge { display: inline-block; background: #e6f4ea; border: 1px solid #b7dfc2;
++                 border-radius: 3px; padding: 0.05rem 0.4rem; margin-left: 0.5rem;
++                 font-size: 0.75rem; font-weight: normal; vertical-align: middle; }
++.release-date { margin: 0 0 0.4rem; font-size: 0.85rem; color: #666; }
++.release-summary { margin: 0 0 0.5rem; }
