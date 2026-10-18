@@ -61,11 +61,41 @@ deploy anything that has not got past section 1.
 
 ### 0.2 Transcript
 
+Run this **on the server**, in the window you will use for the whole
+deployment. Section 1 happens on your own workstation and is not covered by
+it — that is fine, the transcript is the record of what was done to
+production.
+
 ```powershell
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 New-Item -ItemType Directory -Force -Path 'E:\SignageAdmin\Deploy' | Out-Null
 Start-Transcript -Path "E:\SignageAdmin\Deploy\deploy-v1.1.0-$stamp.log"
+
+function Mark {
+    # $args, not a named parameter: this is typed by hand mid-deployment and
+    # 'Mark step 3 publish' must work without quotes. A single named parameter
+    # would bind only the first word and the rest would be lost from the log.
+    #
+    # Flattened first: an unquoted comma makes PowerShell build a nested array,
+    # so 'Mark leak test, HQ only' would otherwise log the literal text
+    # 'System.Object[]' in place of those words.
+    $text = ($args | ForEach-Object { $_ }) -join ' '
+    Write-Host ''
+    Write-Host ("=" * 70)
+    Write-Host ("  {0}   {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $text)
+    Write-Host ("=" * 70)
+}
+
+Mark Deployment v1.1.0 started by $env:USERDOMAIN\$env:USERNAME on $env:COMPUTERNAME
 ```
+
+`Mark` writes a timestamped banner into the transcript. Use it at the top of
+each section below, and any time you want the log to say what you were doing
+and why. `Write-Host` output is captured by `Start-Transcript`, so everything
+lands in the file.
+
+If the window dies mid-deployment, the transcript up to that point is still on
+disk. Start a new one with a fresh `$stamp` rather than appending.
 
 ### 0.3 Things you will need
 
@@ -202,6 +232,10 @@ at section 5.4 and section 6. Everything behind them has been verified above.
 
 ## 2. Back up
 
+```powershell
+Mark Section 2 - backing up database and publish folder
+```
+
 The schema migration runs automatically at startup and cannot be undone
 in place. Take both backups.
 
@@ -221,6 +255,10 @@ Confirm both exist and are non-zero before going on.
 ### 2.1 Record what is there now
 
 ```powershell
+Mark Section 2.1 - recording current item counts
+```
+
+```powershell
 $before = C:\temp\sqlite3.exe $dbPath `
   "SELECT FeedId, COUNT(*) FROM FeedItems WHERE IsActive = 1 GROUP BY FeedId;"
 $before
@@ -233,6 +271,10 @@ their content survived rather than asserting it.
 ---
 
 ## 3. Publish and deploy
+
+```powershell
+Mark Section 3 - publishing and deploying
+```
 
 ```powershell
 cd C:\temp\SignageFeedAdmin_prod\SignageFeedAdmin
@@ -279,6 +321,10 @@ Then copy `publish\*` to `$appPath` as per your normal deployment.
 
 ## 4. Place the external changelog
 
+```powershell
+Mark Section 4 - placing the external changelog
+```
+
 The app looks for `changelog.json` **beside the database first**, and falls
 back to the copy inside the publish folder. Putting it beside the database
 means a note can be corrected without a redeployment, because deploying
@@ -294,6 +340,10 @@ Set `Feed:ChangelogPath` only if you want it somewhere else.
 ---
 
 ## 5. Start and verify
+
+```powershell
+Mark Section 5 - starting the app pool and verifying
+```
 
 ```powershell
 & $appcmd start apppool /apppool.name:$pool
@@ -359,6 +409,10 @@ running version does not match the newest entry, the csproj `<Version>` and
 
 ## 6. Prove the separation works
 
+```powershell
+Mark Section 6 - leak test - HQ only must not reach FW
+```
+
 **Do this before repointing any player.** It is the whole point of the release.
 
 1. Open the Datacentre feed, add an item reading `HQ TEST ONLY`, select **HQ only**, save.
@@ -389,6 +443,10 @@ follow **Rollback** at the end of this document, and tell me.
 
 ## 7. Repoint the BrightSign players
 
+```powershell
+Mark Section 7 - repointing players
+```
+
 Only after section 6 passes.
 
 | Site | New feed URL |
@@ -411,7 +469,15 @@ Once every datacentre player is repointed, decide whether to keep
 ## 8. Stop the transcript
 
 ```powershell
+Mark Deployment v1.1.0 completed
 Stop-Transcript
+```
+
+Keep the transcript with the backup and the before/after item counts. Those
+three together are the record of this change:
+
+```powershell
+Get-ChildItem 'E:\SignageAdmin\Deploy' -Filter "*$stamp*" | Select Name, Length, LastWriteTime
 ```
 
 ---
@@ -461,6 +527,30 @@ Rolling back is not free: it restores the database as it was at backup, so
 adding items for hours, say so before you do it.
 
 ## R2. Set up
+
+Start a transcript for the rollback too. It is a separate event from the
+deployment and deserves its own record — if anyone asks later what was done to
+production and when, this is the answer.
+
+```powershell
+$rbStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+New-Item -ItemType Directory -Force -Path 'E:\SignageAdmin\Deploy' | Out-Null
+Start-Transcript -Path "E:\SignageAdmin\Deploy\ROLLBACK-v1.1.0-$rbStamp.log"
+
+function Mark {
+    # Flattened: an unquoted comma would otherwise log 'System.Object[]'.
+    $text = ($args | ForEach-Object { $_ }) -join ' '
+    Write-Host ''
+    Write-Host ("=" * 70)
+    Write-Host ("  {0}   {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $text)
+    Write-Host ("=" * 70)
+}
+
+Mark ROLLBACK started by $env:USERDOMAIN\$env:USERNAME - reason: "PUT THE REAL REASON HERE"
+```
+
+Put the actual reason in that last line. In six months it is the only thing
+that will explain why this happened.
 
 ```powershell
 $appcmd  = "$env:windir\system32\inetsrv\appcmd.exe"
@@ -524,6 +614,10 @@ If no player has been repointed yet, skip this and carry on.
 
 ## R4. Take a snapshot of the broken state first
 
+```powershell
+Mark R4 - snapshotting the failed state
+```
+
 You will want this to work out what happened, and it costs seconds.
 
 ```powershell
@@ -539,6 +633,10 @@ Get-EventLog -LogName Application -Newest 60 |
 ```
 
 ## R5. Restore
+
+```powershell
+Mark R5 - restoring binaries and database from $stamp
+```
 
 ```powershell
 & $appcmd stop apppool /apppool.name:$pool
@@ -569,6 +667,10 @@ Start-Sleep -Seconds 5
 ## R6. Verify the rollback
 
 ```powershell
+Mark R6 - verifying the rollback
+```
+
+```powershell
 Invoke-WebRequest 'https://swpapp-digisign.swp-rest.police.int/signageadmin/' `
   -UseDefaultCredentials -UseBasicParsing | Select StatusCode
 ```
@@ -595,7 +697,13 @@ is working.
 
 ## R7. Afterwards
 
-- Keep the `failed-v1.1.0-*` snapshot and the transcript. Send them to me.
+```powershell
+Mark ROLLBACK completed
+Stop-Transcript
+```
+
+- Keep the `failed-v1.1.0-*` snapshot and **both** transcripts — the deployment
+  one and the rollback one. Send them to me.
 - Tell the datacentre team which items were lost, if the backup was not recent.
 - Do not retry the deployment until the cause is understood. The local test in
   section 1.4 passing means the targeting logic is sound, so a failure here is
