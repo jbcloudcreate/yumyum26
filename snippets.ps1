@@ -64,3 +64,12 @@ Stop-Transcript
 # Both are clean but Step 3 still shows Matthews2 as sender: it’s client side (cause 3), so we’d look at how she’s sending.
 
 # It would also help to know whether she’s using classic Outlook, new Outlook/OWA or a mobile device, and whether the affected emails are replies or new messages. Send me the output and we’ll go from there.
+
+Start-Transcript -Path "$env:USERPROFILE\Logs\KirstyYoung-Step3-$(Get-Date -f yyyyMMdd-HHmm).log"
+Write-Host "=== [$(Get-Date -f s)] Transport rules mentioning old name ==="
+Get-TransportRule | Where-Object { ($_ | Out-String) -match 'Matthews' } | Select-Object Name, State, Priority
+
+Write-Host "=== [$(Get-Date -f s)] OWA/roaming signature ==="
+Get-MailboxMessageConfiguration -Identity 'Kirsty.Young@south-wales.police.uk' |
+    Format-List SignatureText, SignatureHtml, AutoAddSignature, AutoAddSignatureOnReply
+Stop-Transcript
