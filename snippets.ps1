@@ -73,3 +73,24 @@ Write-Host "=== [$(Get-Date -f s)] OWA/roaming signature ==="
 Get-MailboxMessageConfiguration -Identity 'Kirsty.Young@south-wales.police.uk' |
     Format-List SignatureText, SignatureHtml, AutoAddSignature, AutoAddSignatureOnReply
 Stop-Transcript
+
+Subject: Your call – old email address showing on external emails
+
+Hi Kirsty,
+
+I'm from the Unified Comms team and I've picked up your call about your old email address (Kirsty.Matthews2) showing when you email externally.
+
+I've checked your mailbox and our mail logs, and everything you've sent externally over the last few days has gone out from Kirsty.Young@south-wales.police.uk. So the problem is likely somewhere other than the address itself. Could you help me with a few things so I can pin it down?
+
+1. Where are you seeing the old address? For example, has someone outside SWP told you, are replies coming back addressed to Kirsty.Matthews2, or is it something you see yourself? If you have an example email, a screenshot or a forwarded copy would be really helpful.
+
+2. Could you send me a quick test email? Just reply to this one with a line of text, exactly as you'd normally reply, with your usual signature included.
+
+3. Which version of Outlook do you use? Is it the desktop app, Outlook on the web, or your work mobile? If you use more than one, does it happen on all of them?
+
+Once I have those, I should be able to tell you what's causing it and get it sorted.
+
+Thanks,
+James
+Unified Communications – Platforms
+South Wales Police
