@@ -100,3 +100,31 @@ South Wales Police
 
 
 Thanks for sending that over, Kirsty. I’ve checked everything on our side and your account is set up correctly: every email you send goes out from your new address, Kirsty.Young@south-wales.police.uk. I traced the exact email in your example and confirmed it left us with your new address. What’s happening is that Cardiff Council’s system still has an old saved contact for you under your previous name, so when people there reply or forward your emails, their system swaps in your old details. It’s a bit like a friend who still has your old number saved in their phone: your number is correct, but their phone still shows the old one. Nothing is wrong with your account, you don’t need to change anything, and any replies sent to your old address will still reach you. If it bothers you, the easiest fix is to ask your regular contacts at the Council to delete or update the saved contact for you, or to tell their IT team, and it should then show correctly.
+
+#####################################
+
+Subject: RE: Incident: 494025 - Old email address is showing
+
+Hi Kirsty,
+
+Thanks, that's really helpful and confirms what I suspected.
+
+Your account is set up correctly. Every email you send goes out under your new name and address, which is why it looks right when you email your personal address.
+
+The old details are coming from Tom's own Outlook at Cardiff Council. He most likely has an old contact saved for you under your previous name, and his Outlook uses it when he replies to or forwards your emails. It's a bit like someone who still has your old number saved in their phone: your number is fine, they just need to update their contacts.
+
+If you could ask Tom to do the following, that should sort it:
+
+1. Delete the old "Matthews, Kirsty" contact from his Outlook contacts.
+2. Remove your old address from his suggestions. When he starts typing your name in a new email and the old address pops up, he can click the small X next to it.
+
+In the meantime, any emails sent to your old address will still reach you, so nothing will be missed.
+
+I'll close the ticket for now, but let me know if it carries on after Tom has updated his contacts.
+
+Many thanks,
+James
+
+###########################################################################
+
+Resolution: All SWP-side config verified correct (mailbox, sync, transport rules, signature); message trace and test headers confirm outbound mail sends as Kirsty.Young@south-wales.police.uk. Email to the user’s personal address displays correctly. Issue isolated to one external recipient (Cardiff Council), whose Outlook holds a stale contact/autocomplete entry under the user’s previous name. User advised to ask the recipient to remove the old contact. Old alias retained so mail to the previous address is still delivered. No SWP change required.
