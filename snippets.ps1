@@ -94,3 +94,9 @@ Thanks,
 James
 Unified Communications – Platforms
 South Wales Police
+
+
+##################################
+
+
+Thanks for sending that over, Kirsty. I’ve checked everything on our side and your account is set up correctly: every email you send goes out from your new address, Kirsty.Young@south-wales.police.uk. I traced the exact email in your example and confirmed it left us with your new address. What’s happening is that Cardiff Council’s system still has an old saved contact for you under your previous name, so when people there reply or forward your emails, their system swaps in your old details. It’s a bit like a friend who still has your old number saved in their phone: your number is correct, but their phone still shows the old one. Nothing is wrong with your account, you don’t need to change anything, and any replies sent to your old address will still reach you. If it bothers you, the easiest fix is to ask your regular contacts at the Council to delete or update the saved contact for you, or to tell their IT team, and it should then show correctly.
