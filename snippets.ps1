@@ -29,3 +29,38 @@ EHLO test.example
 MAIL FROM:<>
 RCPT TO:<Eleri.Phillips@south-wales.police.uk>
 QUIT
+
+# INC 494025
+
+# Three likely causes, in order of likelihood
+
+# On-prem change hasn’t synced to the cloud. EXO’s copy of her mailbox still has Matthews2 as primary. This usually happens when Entra Connect hit a sync error on her object, such as a duplicate proxy address conflict.
+# Send-from-alias is enabled in the tenant. When it’s on, replies to a message sent to an alias go out from that alias. So any external contact still emailing kirsty.matthews2@ gets replies from Matthews2. This fits “external only” well.
+# Client side. She picked the old address in the From field, has a cached From entry, or is using a mobile app or old profile.
+
+# Step-by-step checks (on your work device, EXO session)
+
+Start-Transcript -Path "$env:USERPROFILE\Logs\KirstyYoung-OldAddress-$(Get-Date -f yyyyMMdd-HHmm).log"
+
+Write-Host "=== [$(Get-Date -f s)] Step 1: Cloud view of mailbox ==="
+Get-EXOMailbox -Identity 'Kirsty.Young@south-wales.police.uk' -Properties DisplayName,PrimarySmtpAddress,WindowsEmailAddress,UserPrincipalName,EmailAddresses,WhenChanged |
+    Format-List DisplayName,PrimarySmtpAddress,WindowsEmailAddress,UserPrincipalName,WhenChanged,EmailAddresses
+
+Write-Host "=== [$(Get-Date -f s)] Step 2: Send-from-alias setting ==="
+Get-OrganizationConfig | Format-List SendFromAliasEnabled
+
+Write-Host "=== [$(Get-Date -f s)] Step 3: What address her outbound mail actually used (5 days) ==="
+foreach ($s in 'Kirsty.Young@south-wales.police.uk','Kirsty.Matthews2@south-wales.police.uk') {
+    Get-MessageTraceV2 -SenderAddress $s -StartDate (Get-Date).AddDays(-5) -EndDate (Get-Date) |
+        Where-Object { $_.RecipientAddress -notlike '*@south-wales.police.uk' } |
+        Select-Object Received, SenderAddress, RecipientAddress, Status, Subject
+}
+Stop-Transcript
+
+#How to read the results
+
+# Step 1 shows PrimarySmtpAddress = Matthews2: it’s a sync problem (cause 1). Next we’d check Entra Connect sync errors for her object.
+# Step 1 shows Young correctly and Step 2 is True: check whether the Matthews2 sends in Step 3 are replies to external people writing to her old address (cause 2).
+# Both are clean but Step 3 still shows Matthews2 as sender: it’s client side (cause 3), so we’d look at how she’s sending.
+
+# It would also help to know whether she’s using classic Outlook, new Outlook/OWA or a mobile device, and whether the affected emails are replies or new messages. Send me the output and we’ll go from there.
