@@ -70,3 +70,25 @@ $oldFolders | ForEach-Object {
 
 Stop-Transcript
 
+##############################################
+
+# The restore request recorded the exact source GUID it copied from, so start there. Your transcript is still running, so carry on in the same window:
+
+Write-Host "=== $(Get-Date -f s) | Step 0b: find old mailbox ==="
+Get-MailboxRestoreRequest | Format-Table Name, Status, SourceMailbox, TargetMailbox -AutoSize
+
+Get-Recipient -IncludeSoftDeletedRecipients -Filter "DisplayName -like '*Meyrick*'" |
+    Format-Table Name, RecipientTypeDetails, PrimarySmtpAddress, ExchangeGuid, WhenSoftDeleted -AutoSize
+
+Get-Mailbox -InactiveMailboxOnly -Filter "DisplayName -like '*Meyrick*'" |
+    Format-Table DisplayName, PrimarySmtpAddress, ExchangeGuid -AutoSize
+
+# If any of those shows the old mailbox’s ExchangeGuid, set $old from that GUID:
+
+$old = Get-Mailbox -SoftDeletedMailbox -Identity '<old ExchangeGuid>'
+# or, if it shows as active or inactive instead:
+$old = Get-Mailbox -Identity '<old ExchangeGuid>'
+$old | Format-List DisplayName, ExchangeGuid, WhenSoftDeleted, ArchiveStatus, ArchiveGuid, RetentionPolicy
+
+
+
