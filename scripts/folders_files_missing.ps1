@@ -90,5 +90,23 @@ $old = Get-Mailbox -SoftDeletedMailbox -Identity '<old ExchangeGuid>'
 $old = Get-Mailbox -Identity '<old ExchangeGuid>'
 $old | Format-List DisplayName, ExchangeGuid, WhenSoftDeleted, ArchiveStatus, ArchiveGuid, RetentionPolicy
 
+# Step 0c – Load the old mailbox
+
+$old = Get-Mailbox -Identity 'c8b56744-159b-434e-80b3-4267f527925d'
+$old | Format-List DisplayName, PrimarySmtpAddress, RecipientTypeDetails, ExchangeGuid, WhenSoftDeleted, ArchiveStatus, RetentionPolicy
+
+# Step 1 – Capture why the restore failed
+
+Write-Host "=== $(Get-Date -f s) | Step 1: restore request ==="
+$stats = Get-MailboxRestoreRequest -Name 'Trudi.Meyrick@south-wales.police.uk' |
+    Get-MailboxRestoreRequestStatistics -IncludeReport
+$stats | Export-Clixml "$out\RestoreRequestStats.xml"
+$stats.Report.Entries | Out-File "$out\RestoreReport-Entries.txt"
+
+$stats | Format-List Status, StatusDetail, FailureType, FailureSide, FailureTimestamp, Message,
+    Source*, Target*, QueuedTimestamp, LastUpdateTimestamp, PercentComplete,
+    EstimatedTransferItemCount, ItemsTransferred, BadItemsEncountered, LargeItemsEncountered
+
+$stats.Report.Failures | Select-Object -Last 3 | Format-List Timestamp, FailureType, Message
 
 
