@@ -206,3 +206,33 @@ $rows | Export-Csv "$out\Audit-Deletes-Moves.csv" -NoTypeInformation
 $rows | Group-Object Mailbox, Operation, By | Sort-Object Count -Descending | Format-Table Count, Name -AutoSize
 $rows | Where-Object { "$($_.Folder) $($_.DestFolder)" -match 'Calendar|Chief Supt' } |
     Format-Table Time, Mailbox, Operation, By, Folder, DestFolder, Items -AutoSize
+
+# Step 6a – Live check of the disputed folders
+
+Write-Host "=== $(Get-Date -f s) | Step 6a: live check ==="
+$liveOld = Get-MailboxFolderStatistics -Identity $old.ExchangeGuid.ToString()
+$liveNew = Get-MailboxFolderStatistics -Identity '05a9f09e-14ff-48a6-abfc-f749ca483433'
+
+"--- OLD (live) ---"
+$liveOld | Where-Object FolderPath -match '^/Inbox/3979|BCU' | Format-Table FolderPath, ItemsInFolder -AutoSize
+"--- NEW (live) ---"
+$liveNew | Where-Object FolderPath -match '^/Inbox/3979|BCU' | Format-Table FolderPath, ItemsInFolder -AutoSize
+
+"Folder count now   - Old: $($liveOld.Count)  New: $($liveNew.Count)"
+"Folder count 15:16 - Old: $($oldFolders.Count)  New: $($newFolders.Count)"
+
+# Step 6b – Who has access, and when each mailbox was last used
+
+Write-Host "=== $(Get-Date -f s) | Step 6b: access and activity ==="
+foreach ($id in $old.ExchangeGuid.ToString(), '05a9f09e-14ff-48a6-abfc-f749ca483433') {
+    "===== $id ====="
+    Get-MailboxPermission -Identity $id |
+        Where-Object { $_.User -notlike 'NT AUTHORITY\*' -and -not $_.Deny -and -not $_.IsInherited } |
+        Format-Table User, AccessRights -AutoSize
+    Get-MailboxStatistics -Identity $id | Format-List LastUserActionTime, LastInteractionTime, LastLogonTime
+}
+
+"--- Calendar delegates OLD ---"
+Get-MailboxFolderPermission -Identity 'Trudi.Meyrick@south-wales.police.uk:\Calendar' | Format-Table User, AccessRights, SharingPermissionFlags -AutoSize
+"--- Calendar delegates NEW ---"
+Get-MailboxFolderPermission -Identity 'Trudi.Meyrick1@south-wales.police.uk:\Calendar' | Format-Table User, AccessRights, SharingPermissionFlags -AutoSize
