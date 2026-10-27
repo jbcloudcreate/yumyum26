@@ -143,3 +143,22 @@ $cmp | Where-Object SideIndicator -eq '=>' |
     Tee-Object -Variable onlyNew | Format-Table -AutoSize
 $onlyNew | Export-Csv "$out\Only-In-New.csv" -NoTypeInformation
 
+# Step 4a – Prove the 2021-dated folders came from the copy
+
+Write-Host "=== $(Get-Date -f s) | Step 4: confirm ==="
+Get-Mailbox -Identity '05a9f09e-14ff-48a6-abfc-f749ca483433' | Format-List DisplayName, WhenMailboxCreated
+
+# Step 4b – What the restore log says about the calendar folders
+
+Select-String -Path "$out\RestoreReport-Entries.txt" -Pattern 'Davis|Hughes|Williams|Calendar|corrupt|skip' |
+    Select-Object -First 30 | ForEach-Object Line
+
+# Step 4c – Deleted-item counts on both sides
+
+"--- OLD ---"
+Get-MailboxFolderStatistics -Identity $old.ExchangeGuid.ToString() -FolderScope RecoverableItems |
+    Format-Table FolderPath, ItemsInFolder, FolderSize -AutoSize
+"--- NEW ---"
+Get-MailboxFolderStatistics -Identity '05a9f09e-14ff-48a6-abfc-f749ca483433' -FolderScope RecoverableItems |
+    Format-Table FolderPath, ItemsInFolder, FolderSize -AutoSize
+
