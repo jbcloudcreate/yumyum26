@@ -1,3 +1,23 @@
+# EMAIL
+
+Subject: Mailbox transfer – missing folders located
+
+Hi,
+
+Following the report of missing emails after the mailbox transfer, I've completed a full check of both mailboxes.
+
+The good news is that nothing has been lost. Every folder from the previous mailbox arrived in the new one. The folders that appear to be missing, including the 3979 folders and nine calendars, are now in the new mailbox's Deleted Items with all their contents intact. They were moved there in a single action on Monday 26 October between 08:43 and 08:44, four days after the transfer had finished.
+
+We can restore them straight away, either back to where they were originally or into a single folder (e.g. "Previous mailbox") so the new folder structure isn't affected. Please let me know which you'd prefer. In the meantime, please don't empty the Deleted Items folder.
+
+If you would like us to establish who moved the folders and how, that would need a Microsoft Purview audit investigation. Purview is Microsoft 365's compliance and audit service; it records actions taken in mailboxes, such as which account moved or deleted items, when, and from which device or app. Access to it is restricted, so it would need to be requested and approved. Let me know if you'd like us to pursue this.
+
+I've attached a summary of the findings and the evidence.
+
+Kind regards,
+James
+Senior ICT Systems Engineer, Unified Communications
+
 # Step 0 – Evidence folder and transcript
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
