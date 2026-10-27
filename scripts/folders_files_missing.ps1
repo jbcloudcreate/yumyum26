@@ -236,3 +236,44 @@ foreach ($id in $old.ExchangeGuid.ToString(), '05a9f09e-14ff-48a6-abfc-f749ca483
 Get-MailboxFolderPermission -Identity 'Trudi.Meyrick@south-wales.police.uk:\Calendar' | Format-Table User, AccessRights, SharingPermissionFlags -AutoSize
 "--- Calendar delegates NEW ---"
 Get-MailboxFolderPermission -Identity 'Trudi.Meyrick1@south-wales.police.uk:\Calendar' | Format-Table User, AccessRights, SharingPermissionFlags -AutoSize
+
+# Step 7a – Full snapshots, no cap
+
+Write-Host "=== $(Get-Date -f s) | Step 7a: full snapshots ==="
+$props  = 'FolderPath','FolderType','ItemsInFolder','FolderSize','CreationTime'
+$oldAll = Get-MailboxFolderStatistics -Identity $old.ExchangeGuid.ToString() -ResultSize Unlimited | Select-Object $props
+$newAll = Get-MailboxFolderStatistics -Identity '05a9f09e-14ff-48a6-abfc-f749ca483433' -ResultSize Unlimited | Select-Object $props
+"Folder count - Old: $($oldAll.Count)  New: $($newAll.Count)"
+$oldAll | Export-Csv "$out\Old-Folders-Full.csv" -NoTypeInformation
+$newAll | Export-Csv "$out\New-Folders-Full.csv" -NoTypeInformation
+
+# Step 7b – Top-level Inbox folders (what you saw in Outlook)
+
+Write-Host "=== $(Get-Date -f s) | Step 7b: Inbox top level ==="
+"--- OLD ---"
+$oldAll | Where-Object FolderPath -match '^/Inbox/[^/]+$' | Format-Table FolderPath, ItemsInFolder, CreationTime -AutoSize
+"--- NEW ---"
+$newAll | Where-Object FolderPath -match '^/Inbox/[^/]+$' | Format-Table FolderPath, ItemsInFolder, CreationTime -AutoSize
+
+# Step 7c – Full compare: folders, then item counts
+
+Write-Host "=== $(Get-Date -f s) | Step 7c: full compare ==="
+$cmp     = Compare-Object $oldAll $newAll -Property FolderPath -PassThru
+$onlyOld = $cmp | Where-Object SideIndicator -eq '<=' | Select-Object FolderPath, ItemsInFolder, CreationTime
+$onlyNew = $cmp | Where-Object SideIndicator -eq '=>' | Select-Object FolderPath, ItemsInFolder, CreationTime
+"Only in OLD: $(@($onlyOld).Count)   Only in NEW: $(@($onlyNew).Count)"
+$onlyOld | Export-Csv "$out\Only-In-Old-Full.csv" -NoTypeInformation
+$onlyNew | Export-Csv "$out\Only-In-New-Full.csv" -NoTypeInformation
+"--- Only in OLD ---"; $onlyOld | Format-Table -AutoSize
+"--- Only in NEW ---"; $onlyNew | Format-Table -AutoSize
+
+$newByPath = @{}; $newAll | ForEach-Object { $newByPath[$_.FolderPath] = $_ }
+$diff = $oldAll | ForEach-Object {
+    $n = $newByPath[$_.FolderPath]
+    if ($n) { [pscustomobject]@{ FolderPath = $_.FolderPath; Old = $_.ItemsInFolder; New = $n.ItemsInFolder; Diff = $n.ItemsInFolder - $_.ItemsInFolder } }
+}
+$diff | Export-Csv "$out\Matched-Folder-Counts.csv" -NoTypeInformation
+"--- Fewer items in NEW (top 20) ---"
+$diff | Where-Object Diff -lt 0 | Sort-Object Diff | Select-Object -First 20 | Format-Table -AutoSize
+"--- More items in NEW (top 10) ---"
+$diff | Where-Object Diff -gt 0 | Sort-Object Diff -Descending | Select-Object -First 10 | Format-Table -AutoSize
