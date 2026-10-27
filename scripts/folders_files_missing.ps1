@@ -109,4 +109,37 @@ $stats | Format-List Status, StatusDetail, FailureType, FailureSide, FailureTime
 
 $stats.Report.Failures | Select-Object -Last 3 | Format-List Timestamp, FailureType, Message
 
+# Step 2 – Snapshot folders (old mailbox is active, so no soft-deleted switch)
+
+Write-Host "=== $(Get-Date -f s) | Step 2: folder snapshots ==="
+$props = 'FolderPath','FolderType','ItemsInFolder','FolderSize','CreationTime','NewestItemReceivedDate'
+
+$oldFolders = Get-MailboxFolderStatistics -Identity $old.ExchangeGuid.ToString() -IncludeOldestAndNewestItems | Select-Object $props
+$newFolders = Get-MailboxFolderStatistics -Identity '05a9f09e-14ff-48a6-abfc-f749ca483433' -IncludeOldestAndNewestItems | Select-Object $props
+
+$oldFolders | Export-Csv "$out\Old-Folders.csv" -NoTypeInformation
+$newFolders | Export-Csv "$out\New-Folders.csv" -NoTypeInformation
+
+# Save the skipped/large item detail too
+$stats.Report.LargeItems   | Format-List * | Out-File "$out\RestoreReport-LargeItems.txt"
+$stats.Report.MissingItems | Format-List * | Out-File "$out\RestoreReport-MissingItems.txt"
+
+# Step 3 – Compare against the copy start time
+
+Write-Host "=== $(Get-Date -f s) | Step 3: compare ==="
+$copyStart = $stats.QueuedTimestamp
+$cmp = Compare-Object $oldFolders $newFolders -Property FolderPath -PassThru
+
+"--- Only in OLD ---"
+$cmp | Where-Object SideIndicator -eq '<=' |
+    Select-Object FolderPath, ItemsInFolder, CreationTime, NewestItemReceivedDate,
+        @{n='CreatedAfterCopy'; e={ $_.CreationTime -gt $copyStart }} |
+    Tee-Object -Variable onlyOld | Format-Table -AutoSize
+$onlyOld | Export-Csv "$out\Only-In-Old.csv" -NoTypeInformation
+
+"--- Only in NEW ---"
+$cmp | Where-Object SideIndicator -eq '=>' |
+    Select-Object FolderPath, ItemsInFolder, CreationTime |
+    Tee-Object -Variable onlyNew | Format-Table -AutoSize
+$onlyNew | Export-Csv "$out\Only-In-New.csv" -NoTypeInformation
 
