@@ -277,3 +277,30 @@ $diff | Export-Csv "$out\Matched-Folder-Counts.csv" -NoTypeInformation
 $diff | Where-Object Diff -lt 0 | Sort-Object Diff | Select-Object -First 20 | Format-Table -AutoSize
 "--- More items in NEW (top 10) ---"
 $diff | Where-Object Diff -gt 0 | Sort-Object Diff -Descending | Select-Object -First 10 | Format-Table -AutoSize
+
+# Step 8a – When, and who has rights to those folders
+
+Write-Host "=== $(Get-Date -f s) | Step 8a: when moved / folder rights ==="
+$newGuid = '05a9f09e-14ff-48a6-abfc-f749ca483433'
+
+"--- Top-level folders in Deleted Items (NEW) ---"
+Get-MailboxFolderStatistics -Identity $newGuid -FolderScope DeletedItems |
+    Where-Object FolderPath -match '^/Deleted Items/[^/]+$' |
+    Format-Table FolderPath, ItemsInFolder, CreationTime, LastMovedTimeStamp, LastModifiedTime -AutoSize
+
+"--- Calendar subfolders (NEW) ---"
+Get-MailboxFolderStatistics -Identity $newGuid -FolderScope Calendar |
+    Format-Table FolderPath, ItemsInFolder, CreationTime -AutoSize
+
+foreach ($f in 'Inbox','Deleted Items') {
+    "--- Folder permissions NEW :\$f ---"
+    Get-MailboxFolderPermission -Identity "Trudi.Meyrick1@south-wales.police.uk:\$f" |
+        Format-Table User, AccessRights, SharingPermissionFlags -AutoSize
+}
+
+# Step 8b – How long Deleted Items is kept
+
+Write-Host "=== $(Get-Date -f s) | Step 8b: Deleted Items retention ==="
+Get-RetentionPolicyTag | Where-Object Type -eq 'DeletedItems' |
+    Format-Table Name, AgeLimitForRetention, RetentionAction, RetentionEnabled -AutoSize
+(Get-RetentionPolicy 'Default MRM Policy').RetentionPolicyTagLinks
