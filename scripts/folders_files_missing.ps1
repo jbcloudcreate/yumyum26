@@ -304,3 +304,13 @@ Write-Host "=== $(Get-Date -f s) | Step 8b: Deleted Items retention ==="
 Get-RetentionPolicyTag | Where-Object Type -eq 'DeletedItems' |
     Format-Table Name, AgeLimitForRetention, RetentionAction, RetentionEnabled -AutoSize
 (Get-RetentionPolicy 'Default MRM Policy').RetentionPolicyTagLinks
+
+# Step 9 – Last PowerShell step: move timestamps and safety net, then close the transcript
+
+Write-Host "=== $(Get-Date -f s) | Step 9: move timestamps and safety net ==="
+Get-MailboxFolderStatistics -Identity $newGuid -ResultSize Unlimited |
+    Where-Object FolderPath -match '^/Deleted Items/[^/]+$' |
+    Format-Table FolderPath, ItemsInFolder, LastMovedTimeStamp, LastModifiedTime -AutoSize
+
+Get-Mailbox -Identity $newGuid | Format-List RetainDeletedItemsFor
+Stop-Transcript
