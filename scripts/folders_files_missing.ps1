@@ -162,3 +162,47 @@ Get-MailboxFolderStatistics -Identity $old.ExchangeGuid.ToString() -FolderScope 
 Get-MailboxFolderStatistics -Identity '05a9f09e-14ff-48a6-abfc-f749ca483433' -FolderScope RecoverableItems |
     Format-Table FolderPath, ItemsInFolder, FolderSize -AutoSize
 
+# Step 5a – Skipped items by folder
+
+Write-Host "=== $(Get-Date -f s) | Step 5a: skipped items by folder ==="
+$skipped = @($stats.Report.BadItems) + @($stats.Report.LargeItems) + @($stats.Report.MissingItems) | Where-Object { $_ }
+"Total skipped records: $($skipped.Count)"
+$skipped | Group-Object Kind, FolderName | Sort-Object Count -Descending | Format-Table Count, Name -AutoSize
+$skipped | Select-Object Kind, FolderName, Subject, DateSent, MessageSize |
+    Export-Csv "$out\Skipped-Items.csv" -NoTypeInformation
+
+# Step 5b – Cleaner restore log filter
+
+Write-Host "=== $(Get-Date -f s) | Step 5b: restore log ==="
+$stats.Report.Entries |
+    Where-Object { $_.LocalizedString -notmatch 'TotalTimeProcessingMessages' -and
+                   $_.LocalizedString -match 'Calendar|corrupt|fail|consisten|missing|Davis|Hughes|Williams' } |
+    Select-Object -Last 40 | ForEach-Object LocalizedString
+
+# Step 5c – Audit log: deletes and moves in both mailboxes
+
+Write-Host "=== $(Get-Date -f s) | Step 5c: audit log ==="
+$ops   = 'SoftDelete','HardDelete','MoveToDeletedItems','Move'
+$audit = foreach ($mbx in 'Trudi.Meyrick@south-wales.police.uk','Trudi.Meyrick1@south-wales.police.uk') {
+    Search-UnifiedAuditLog -StartDate '2026-10-20' -EndDate (Get-Date) -Operations $ops -FreeText $mbx -ResultSize 5000
+}
+$audit = $audit | Sort-Object Identity -Unique
+
+$rows = $audit | ForEach-Object {
+    $d = $_.AuditData | ConvertFrom-Json
+    [pscustomobject]@{
+        Time       = $_.CreationDate
+        Mailbox    = $d.MailboxOwnerUPN
+        Operation  = $_.Operations
+        By         = $_.UserIds
+        Folder     = $d.Folder.Path
+        DestFolder = $d.DestFolder.Path
+        Items      = @($d.AffectedItems).Count
+        Client     = $d.ClientInfoString
+    }
+} | Sort-Object Time
+$rows | Export-Csv "$out\Audit-Deletes-Moves.csv" -NoTypeInformation
+
+$rows | Group-Object Mailbox, Operation, By | Sort-Object Count -Descending | Format-Table Count, Name -AutoSize
+$rows | Where-Object { "$($_.Folder) $($_.DestFolder)" -match 'Calendar|Chief Supt' } |
+    Format-Table Time, Mailbox, Operation, By, Folder, DestFolder, Items -AutoSize
